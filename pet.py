@@ -18,6 +18,16 @@ STYLES = {
     "pixel": BASE_DIR / "assets" / "raven_pixel_concept_v1.png",
     "realistic": BASE_DIR / "assets" / "raven_2d_concept_v4.png",
 }
+ANIMATION_SHEETS = {
+    "pixel": {
+        "idle": (BASE_DIR / "assets" / "raven_pixel_idle_sheet.png", 4),
+        "flight": (BASE_DIR / "assets" / "raven_pixel_flight_sheet.png", 6),
+    },
+    "realistic": {
+        "idle": (BASE_DIR / "assets" / "raven_realistic_idle_sheet.png", 4),
+        "flight": (BASE_DIR / "assets" / "raven_realistic_flight_sheet.png", 6),
+    },
+}
 
 IDLE_LINES = [
     "嘎。你忙你的，我只是在监督。", "这个窗口还没招供？效率堪忧。",
@@ -56,8 +66,9 @@ class QiheiPet:
         self.dragged = False
         self.quiet = False
         self.bubble_timer: str | None = None
-        self.source_image: Image.Image | None = None
+        self.frames: dict[str, list[Image.Image]] = {}
         self.tk_image: ImageTk.PhotoImage | None = None
+        self.last_render: tuple[str, int, bool] | None = None
         self.image_item = self.canvas.create_image(PET_SIZE // 2, PET_SIZE // 2)
 
         self.bubble = tk.Toplevel(self.root)
@@ -101,19 +112,46 @@ class QiheiPet:
             return {}
 
     def load_style_image(self) -> None:
-        source = Image.open(STYLES[self.style.get()]).convert("RGBA")
-        source.thumbnail((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.LANCZOS)
-        frame = Image.new("RGBA", (PET_SIZE, PET_SIZE))
-        frame.alpha_composite(source, ((PET_SIZE - source.width) // 2, (PET_SIZE - source.height) // 2))
-        self.source_image = frame
-        self.render_image()
+        style = self.style.get()
+        self.frames = {
+            state: self.load_sheet(path, count, airborne=state == "flight")
+            for state, (path, count) in ANIMATION_SHEETS[style].items()
+        }
+        self.last_render = None
+        self.render_image("idle", 0)
 
-    def render_image(self) -> None:
-        if self.source_image is None:
+    def load_sheet(self, path: Path, count: int, airborne: bool) -> list[Image.Image]:
+        sheet = Image.open(path).convert("RGBA")
+        cell_width = sheet.width // count
+        cropped: list[Image.Image] = []
+        for index in range(count):
+            cell = sheet.crop((index * cell_width, 0, (index + 1) * cell_width, sheet.height))
+            bounds = cell.getchannel("A").getbbox()
+            cropped.append(cell.crop(bounds) if bounds else cell)
+
+        max_width = max(frame.width for frame in cropped)
+        max_height = max(frame.height for frame in cropped)
+        scale = min(IMAGE_SIZE / max_width, IMAGE_SIZE / max_height)
+        frames: list[Image.Image] = []
+        for image in cropped:
+            size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+            image = image.resize(size, Image.Resampling.LANCZOS)
+            frame = Image.new("RGBA", (PET_SIZE, PET_SIZE))
+            x = (PET_SIZE - image.width) // 2
+            y = (PET_SIZE - image.height) // 2 if airborne else PET_SIZE - image.height - 3
+            frame.alpha_composite(image, (x, y))
+            frames.append(frame)
+        return frames
+
+    def render_image(self, state: str, frame_index: int) -> None:
+        render_key = (state, frame_index, self.facing_left)
+        if render_key == self.last_render:
             return
-        frame = ImageOps.mirror(self.source_image) if self.facing_left else self.source_image
+        frame = self.frames[state][frame_index]
+        frame = ImageOps.mirror(frame) if self.facing_left else frame
         self.tk_image = ImageTk.PhotoImage(frame)
         self.canvas.itemconfigure(self.image_item, image=self.tk_image)
+        self.last_render = render_key
 
     def switch_style(self) -> None:
         self.load_style_image()
@@ -137,7 +175,11 @@ class QiheiPet:
                 self.flight = None
                 self.save_state()
                 self.root.after(random.randint(24000, 45000), self.start_flight)
-        bob = math.sin((now - self.started) * (8 if self.flight else 2.2)) * (3 if self.flight else 1.2)
+        state = "flight" if self.flight else "idle"
+        fps = 10 if self.flight else 2.5
+        frame_index = int((now - self.started) * fps) % len(self.frames[state])
+        self.render_image(state, frame_index)
+        bob = math.sin((now - self.started) * 8) * 2 if self.flight else 0
         self.canvas.coords(self.image_item, PET_SIZE // 2, PET_SIZE // 2 + bob)
         self.root.after(33, self.tick)
 
@@ -153,7 +195,7 @@ class QiheiPet:
         new_facing_left = tx < sx
         if new_facing_left != self.facing_left:
             self.facing_left = new_facing_left
-            self.render_image()
+            self.last_render = None
         self.flight = {
             "start": time.perf_counter(), "duration": random.uniform(2.0, 3.3),
             "sx": sx, "sy": sy, "tx": tx, "ty": ty, "arc": random.randint(55, 120),
@@ -234,7 +276,10 @@ class QiheiPet:
 
 
 if __name__ == "__main__":
-    missing = [str(path) for path in STYLES.values() if not path.exists()]
+    required = list(STYLES.values()) + [
+        path for style in ANIMATION_SHEETS.values() for path, _count in style.values()
+    ]
+    missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise SystemExit("Missing pet assets: " + ", ".join(missing))
     QiheiPet().run()
