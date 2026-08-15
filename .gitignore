@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 pet_state.json
+notes.json
 assets/models/
 assets/qihei*.png
 assets/raven_2d_concept_v2.png

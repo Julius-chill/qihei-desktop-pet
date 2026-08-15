@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import math
 import random
+import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
+from tkinter import messagebox
 
 from PIL import Image, ImageOps, ImageTk
+
+from qihei_core import MemoStore, STORY_SUMMARY, ask_openai, roll_dice
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
@@ -65,11 +70,15 @@ class QiheiPet:
         self.drag_origin: tuple[int, int] | None = None
         self.dragged = False
         self.quiet = False
+        self.animation_paused = tk.BooleanVar(value=False)
+        self.follow_cursor = tk.BooleanVar(value=False)
         self.bubble_timer: str | None = None
         self.frames: dict[str, list[Image.Image]] = {}
         self.tk_image: ImageTk.PhotoImage | None = None
         self.last_render: tuple[str, int, bool] | None = None
         self.image_item = self.canvas.create_image(PET_SIZE // 2, PET_SIZE // 2)
+        self.memo_store = MemoStore(BASE_DIR / "notes.json")
+        self.chat_history: list[dict[str, str]] = []
 
         self.bubble = tk.Toplevel(self.root)
         self.bubble.withdraw()
@@ -85,10 +94,20 @@ class QiheiPet:
         self.menu = tk.Menu(self.root, tearoff=False, font=("Microsoft YaHei UI", 9))
         self.menu.add_command(label="让漆黑说句话", command=lambda: self.say(random.choice(IDLE_LINES)))
         self.menu.add_command(label="出去飞一圈", command=self.start_flight)
+        self.menu.add_command(label="向漆黑提问", command=self.open_question_window)
+        self.menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
+        self.menu.add_command(label="DND骰子", command=self.open_dice_window)
+        self.menu.add_command(label="冒险档案", command=self.open_story_window)
+        self.menu.add_separator()
         style_menu = tk.Menu(self.menu, tearoff=False, font=("Microsoft YaHei UI", 9))
         style_menu.add_radiobutton(label="像素版", variable=self.style, value="pixel", command=self.switch_style)
         style_menu.add_radiobutton(label="写实版", variable=self.style, value="realistic", command=self.switch_style)
         self.menu.add_cascade(label="切换外观", menu=style_menu)
+        self.menu.add_checkbutton(label="暂停活动", variable=self.animation_paused, command=self.toggle_animation)
+        self.menu.add_checkbutton(label="在鼠标附近巡航", variable=self.follow_cursor)
+        self.menu.add_command(label="隐藏5分钟", command=self.hide_temporarily)
+        self.menu.add_command(label="现在几点", command=self.tell_time)
+        self.quiet_menu_index = self.menu.index("end") + 1
         self.menu.add_command(label="安静一会儿", command=self.toggle_quiet)
         self.menu.add_separator()
         self.menu.add_command(label="退出", command=self.close)
@@ -104,6 +123,7 @@ class QiheiPet:
         self.root.after(900, lambda: self.say("小一点，精神一点。这样总算像我了。嘎。", 4300))
         self.root.after(random.randint(9000, 15000), self.start_flight)
         self.schedule_chatter()
+        self.root.after(5000, self.check_reminders)
 
     def load_state(self) -> dict[str, object]:
         try:
@@ -117,6 +137,11 @@ class QiheiPet:
             state: self.load_sheet(path, count, airborne=state == "flight")
             for state, (path, count) in ANIMATION_SHEETS[style].items()
         }
+        self.frames["flight"] = self.add_inbetweens(self.frames["flight"])
+        idle, flight = self.frames["idle"][0], self.frames["flight"][0]
+        downstroke = self.frames["flight"][len(self.frames["flight"]) // 2]
+        self.frames["takeoff"] = [idle, Image.blend(idle, flight, .34), Image.blend(idle, flight, .68), flight]
+        self.frames["landing"] = [downstroke, Image.blend(downstroke, idle, .34), Image.blend(downstroke, idle, .68), idle]
         self.last_render = None
         self.render_image("idle", 0)
 
@@ -140,8 +165,44 @@ class QiheiPet:
             x = (PET_SIZE - image.width) // 2
             y = (PET_SIZE - image.height) // 2 if airborne else PET_SIZE - image.height - 3
             frame.alpha_composite(image, (x, y))
-            frames.append(frame)
+            frames.append(self.clean_specks(frame))
         return frames
+
+    @staticmethod
+    def add_inbetweens(frames: list[Image.Image]) -> list[Image.Image]:
+        expanded: list[Image.Image] = []
+        for index, current in enumerate(frames):
+            following = frames[(index + 1) % len(frames)]
+            expanded.extend([current, Image.blend(current, following, .33), Image.blend(current, following, .66)])
+        return expanded
+
+    @staticmethod
+    def clean_specks(image: Image.Image, minimum_size: int = 4) -> Image.Image:
+        """Remove tiny disconnected alpha islands left by generated sprite sheets."""
+        result = image.copy()
+        alpha = result.getchannel("A").point(lambda value: 0 if value < 40 else value)
+        pixels = alpha.load()
+        width, height = alpha.size
+        visited: set[tuple[int, int]] = set()
+        for start_y in range(height):
+            for start_x in range(width):
+                if not pixels[start_x, start_y] or (start_x, start_y) in visited:
+                    continue
+                stack = [(start_x, start_y)]
+                component: list[tuple[int, int]] = []
+                visited.add((start_x, start_y))
+                while stack:
+                    x, y = stack.pop()
+                    component.append((x, y))
+                    for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                        if 0 <= nx < width and 0 <= ny < height and pixels[nx, ny] and (nx, ny) not in visited:
+                            visited.add((nx, ny))
+                            stack.append((nx, ny))
+                if len(component) < minimum_size:
+                    for x, y in component:
+                        pixels[x, y] = 0
+        result.putalpha(alpha)
+        return result
 
     def render_image(self, state: str, frame_index: int) -> None:
         render_key = (state, frame_index, self.facing_left)
@@ -161,9 +222,11 @@ class QiheiPet:
 
     def tick(self) -> None:
         now = time.perf_counter()
-        if self.flight:
+        flight_progress: float | None = None
+        if self.flight and not self.animation_paused.get():
             elapsed = now - self.flight["start"]
             progress = min(1.0, elapsed / self.flight["duration"])
+            flight_progress = progress
             smooth = progress * progress * (3 - 2 * progress)
             x = self.flight["sx"] + (self.flight["tx"] - self.flight["sx"]) * smooth
             y = (self.flight["sy"] + (self.flight["ty"] - self.flight["sy"]) * smooth
@@ -175,21 +238,34 @@ class QiheiPet:
                 self.flight = None
                 self.save_state()
                 self.root.after(random.randint(24000, 45000), self.start_flight)
-        state = "flight" if self.flight else "idle"
-        fps = 10 if self.flight else 2.5
-        frame_index = int((now - self.started) * fps) % len(self.frames[state])
+        if self.animation_paused.get():
+            state, frame_index = "idle", 0
+        elif self.flight and flight_progress is not None and flight_progress < .12:
+            state = "takeoff"
+            frame_index = min(len(self.frames[state]) - 1, int(flight_progress / .12 * len(self.frames[state])))
+        elif self.flight and flight_progress is not None and flight_progress > .84:
+            state = "landing"
+            frame_index = min(len(self.frames[state]) - 1, int((flight_progress - .84) / .16 * len(self.frames[state])))
+        else:
+            state = "flight" if self.flight else "idle"
+            fps = 15 if self.flight else 2.5
+            frame_index = int((now - self.started) * fps) % len(self.frames[state])
         self.render_image(state, frame_index)
         bob = math.sin((now - self.started) * 8) * 2 if self.flight else 0
         self.canvas.coords(self.image_item, PET_SIZE // 2, PET_SIZE // 2 + bob)
         self.root.after(33, self.tick)
 
     def start_flight(self) -> None:
-        if self.flight or self.drag_origin is not None:
+        if self.flight or self.drag_origin is not None or self.animation_paused.get():
             return
         sx, sy = self.root.winfo_x(), self.root.winfo_y()
         max_x = max(15, self.root.winfo_screenwidth() - PET_SIZE - 15)
         max_y = max(15, self.root.winfo_screenheight() - PET_SIZE - 55)
-        tx, ty = random.randint(15, max_x), random.randint(15, max_y)
+        if self.follow_cursor.get():
+            tx = min(max(15, self.root.winfo_pointerx() - PET_SIZE // 2), max_x)
+            ty = min(max(15, self.root.winfo_pointery() - PET_SIZE - 25), max_y)
+        else:
+            tx, ty = random.randint(15, max_x), random.randint(15, max_y)
         if abs(tx - sx) < 260:
             tx = 15 if sx > max_x / 2 else max_x
         new_facing_left = tx < sx
@@ -232,6 +308,179 @@ class QiheiPet:
         self.bubble.withdraw()
         self.bubble_timer = None
 
+    def make_tool_window(self, title: str, geometry: str) -> tk.Toplevel:
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.geometry(geometry)
+        window.attributes("-topmost", True)
+        window.configure(bg="#181b27")
+        return window
+
+    def open_story_window(self) -> None:
+        window = self.make_tool_window("漆黑的冒险档案", "620x520")
+        text = tk.Text(
+            window, bg="#202433", fg="#eee9dc", insertbackground="#eee9dc",
+            wrap="word", font=("Microsoft YaHei UI", 10), padx=14, pady=12,
+        )
+        text.pack(fill="both", expand=True, padx=10, pady=10)
+        text.insert("1.0", "《鸦影》战役档案\n\n" + STORY_SUMMARY)
+        text.configure(state="disabled")
+
+    def open_question_window(self) -> None:
+        window = self.make_tool_window("向漆黑提问", "570x430")
+        transcript = tk.Text(
+            window, bg="#202433", fg="#eee9dc", insertbackground="#eee9dc",
+            wrap="word", font=("Microsoft YaHei UI", 10), padx=12, pady=10,
+        )
+        transcript.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+        transcript.insert("end", "漆黑：问吧。剧情、人物、线索，或者别的。联网密钥存在时我会调用在线模型。\n\n")
+        row = tk.Frame(window, bg="#181b27")
+        row.pack(fill="x", padx=10, pady=(5, 10))
+        question = tk.Entry(row, font=("Microsoft YaHei UI", 10), bg="#f5f2ea", fg="#22242c")
+        question.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ask_button = tk.Button(row, text="提问", width=8)
+        ask_button.pack(side="right")
+
+        def append_answer(user_text: str, answer: str) -> None:
+            if not window.winfo_exists():
+                return
+            transcript.insert("end", f"漆黑：{answer}\n\n")
+            transcript.see("end")
+            ask_button.configure(state="normal")
+            self.chat_history.extend([
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": answer},
+            ])
+
+        def ask() -> None:
+            user_text = question.get().strip()
+            if not user_text:
+                return
+            question.delete(0, "end")
+            transcript.insert("end", f"你：{user_text}\n")
+            transcript.see("end")
+            ask_button.configure(state="disabled")
+
+            def worker() -> None:
+                answer = ask_openai(user_text, self.chat_history)
+                self.root.after(0, lambda: append_answer(user_text, answer))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ask_button.configure(command=ask)
+        question.bind("<Return>", lambda _event: ask())
+        question.focus_set()
+
+    def open_dice_window(self) -> None:
+        window = self.make_tool_window("漆黑的骰盅", "500x420")
+        top = tk.Frame(window, bg="#181b27")
+        top.pack(fill="x", padx=10, pady=10)
+        expression = tk.Entry(top, font=("Consolas", 12), bg="#f5f2ea", fg="#22242c")
+        expression.insert(0, "d20")
+        expression.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        result_label = tk.Label(
+            window, text="输入骰式，例如 2d6+3", bg="#202433", fg="#eee9dc",
+            font=("Microsoft YaHei UI", 10), wraplength=450, justify="left", padx=12, pady=10,
+        )
+        result_label.pack(fill="x", padx=10)
+        history = tk.Listbox(
+            window, bg="#202433", fg="#eee9dc", selectbackground="#6e2632",
+            font=("Consolas", 10), height=9,
+        )
+        history.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def roll(value: str | None = None) -> None:
+            if value:
+                expression.delete(0, "end")
+                expression.insert(0, value)
+            try:
+                outcome = roll_dice(expression.get())
+            except ValueError as error:
+                result_label.configure(text=str(error))
+                return
+            modifier = outcome["modifier"]
+            detail = f"{outcome['rolls']}" + (f" {modifier:+d}" if modifier else "")
+            line = f"{outcome['expression']} → {outcome['total']}  {detail}"
+            history.insert(0, line)
+            result_label.configure(text=f"结果：{outcome['total']}\n{outcome['comment']}")
+            self.say(f"{outcome['expression']}：{outcome['total']}。{outcome['comment']}", 5200)
+
+        tk.Button(top, text="投掷", width=8, command=roll).pack(side="right")
+        quick = tk.Frame(window, bg="#181b27")
+        quick.pack(fill="x", padx=10)
+        for sides in (4, 6, 8, 10, 12, 20, 100):
+            tk.Button(quick, text=f"d{sides}", command=lambda s=sides: roll(f"d{s}"), width=5).pack(side="left", padx=2)
+        expression.bind("<Return>", lambda _event: roll())
+
+    def open_memo_window(self) -> None:
+        window = self.make_tool_window("漆黑的备忘录", "620x450")
+        listbox = tk.Listbox(
+            window, bg="#202433", fg="#eee9dc", selectbackground="#6e2632",
+            font=("Microsoft YaHei UI", 10), height=12,
+        )
+        listbox.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+        input_frame = tk.Frame(window, bg="#181b27")
+        input_frame.pack(fill="x", padx=10, pady=5)
+        memo_text = tk.Entry(input_frame, font=("Microsoft YaHei UI", 10), bg="#f5f2ea", fg="#22242c")
+        memo_text.pack(fill="x", pady=(0, 5))
+        reminder = tk.Entry(input_frame, font=("Consolas", 10), bg="#f5f2ea", fg="#555")
+        reminder.insert(0, "")
+        reminder.pack(fill="x")
+        tk.Label(
+            input_frame, text="提醒时间可留空，格式：2026-08-16 09:30",
+            bg="#181b27", fg="#aaa7a0", anchor="w",
+        ).pack(fill="x")
+
+        def refresh() -> None:
+            listbox.delete(0, "end")
+            for item in self.memo_store.items:
+                status = "✓" if item.get("done") else "·"
+                alarm = f"  ⏰{item['remind_at'].replace('T', ' ')}" if item.get("remind_at") else ""
+                listbox.insert("end", f"{status} {item['text']}{alarm}")
+
+        def selected_index() -> int | None:
+            selection = listbox.curselection()
+            return selection[0] if selection else None
+
+        def add() -> None:
+            try:
+                self.memo_store.add(memo_text.get(), reminder.get())
+            except ValueError as error:
+                messagebox.showerror("备忘录", str(error), parent=window)
+                return
+            memo_text.delete(0, "end")
+            reminder.delete(0, "end")
+            refresh()
+
+        def toggle_done() -> None:
+            index = selected_index()
+            if index is None:
+                return
+            item = self.memo_store.items[index]
+            item["done"] = not item.get("done", False)
+            self.memo_store.save()
+            refresh()
+
+        def delete() -> None:
+            index = selected_index()
+            if index is None:
+                return
+            del self.memo_store.items[index]
+            self.memo_store.save()
+            refresh()
+
+        buttons = tk.Frame(window, bg="#181b27")
+        buttons.pack(fill="x", padx=10, pady=(5, 10))
+        tk.Button(buttons, text="新增", command=add, width=9).pack(side="left")
+        tk.Button(buttons, text="完成/恢复", command=toggle_done, width=11).pack(side="left", padx=6)
+        tk.Button(buttons, text="删除", command=delete, width=9).pack(side="left")
+        refresh()
+
+    def check_reminders(self) -> None:
+        for item in self.memo_store.due():
+            self.say(f"提醒：{item['text']}\n时间到了。别装没看见，嘎。", 9000)
+        self.root.after(30000, self.check_reminders)
+
     def schedule_chatter(self) -> None:
         self.root.after(random.randint(45000, 90000), self.idle_chatter)
 
@@ -242,8 +491,25 @@ class QiheiPet:
 
     def toggle_quiet(self) -> None:
         self.quiet = not self.quiet
-        self.menu.entryconfigure(3, label="恢复碎碎念" if self.quiet else "安静一会儿")
+        self.menu.entryconfigure(self.quiet_menu_index, label="恢复碎碎念" if self.quiet else "安静一会儿")
         self.say("收到。静默侦察。" if self.quiet else "情报频道恢复。")
+
+    def toggle_animation(self) -> None:
+        if self.animation_paused.get():
+            self.flight = None
+            self.last_render = None
+            self.say("暂停活动。终于有人理解保持安静也是一种才能。")
+        else:
+            self.started = time.perf_counter()
+            self.say("恢复活动。空域仍然安全，暂时。")
+
+    def hide_temporarily(self) -> None:
+        self.hide_bubble()
+        self.root.withdraw()
+        self.root.after(5 * 60 * 1000, self.root.deiconify)
+
+    def tell_time(self) -> None:
+        self.say(f"现在是 {datetime.now():%H:%M}。时间没有失踪，只是你没看它。")
 
     def show_menu(self, event: tk.Event) -> None:
         self.menu.tk_popup(event.x_root, event.y_root)

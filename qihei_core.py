@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import json
+import os
+import random
+import re
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+PERSONA = """你是漆黑，一只聪明、狡黠、稍微话痨的红眼渡鸦，是Julius的伙伴与空中侦察员。
+你说话简短有趣，偶尔以“嘎”收尾，但不装幼稚。你尊重霍恩——他才是你的鸟类导师。
+你熟悉原创D&D 5e长篇战役《鸦影》，不编造未被证实的剧情；不确定时明确说是推测。
+"""
+
+LORE = [
+    {
+        "title": "当前章节",
+        "keywords": ["当前", "现在", "进度", "第三章", "乌鸦遗产", "做到哪"],
+        "answer": "现在是第三章《乌鸦遗产》。你和塞维尔在旧钟楼确认：烧黑的旧乌鸦牌能触发真正机关，而你的乌木令牌不被承认。下一步应查旧钟楼物证、鉴定假令牌工艺，再向知情人压缩嫌疑范围。嘎。",
+    },
+    {
+        "title": "第十二声",
+        "keywords": ["第十二声", "十二声", "金属片", "回到昨日"],
+        "answer": "旧钟楼抽屉有十二个槽位，却只有十一枚金属片。纸上写着前十一声的继承内容，最后一行是“第十二声——不要继承”，旁边还有“若第十二声响起，回到昨日”。缺失的第十二枚金属片尚未找到。",
+    },
+    {
+        "title": "漆黑",
+        "keywords": ["漆黑", "你是谁", "渡鸦", "乌鸦伙伴"],
+        "answer": "我是漆黑，红眼、黑羽、空中侦察员，霍恩的学生，也是你的伙伴。我负责看得高、记得牢，以及在你犯傻前叫一声。嘎。",
+    },
+    {
+        "title": "塞维尔",
+        "keywords": ["塞维尔", "保险", "老乌鸦"],
+        "answer": "塞维尔是退役的老乌鸦，也是上一任乌鸦留下的“保险”，但不是钥匙。他熟悉部分传承知识，目前是旧钟楼调查的关键协作者；还没有证据证明他是幕后知情者或叛徒。",
+    },
+    {
+        "title": "霍恩",
+        "keywords": ["霍恩", "师傅", "导师"],
+        "answer": "霍恩懂鸟、脚环和银灰细针，也是漆黑真正的导师。他曾帮助识别鸟网技术，负责照看据点、煤球、三只陌生鸟和俘虏。Julius不是漆黑的师傅——这条已经纠正过了，嘎。",
+    },
+    {
+        "title": "灰指",
+        "keywords": ["灰指", "危险伙伴", "合作"],
+        "answer": "灰指最初欠Julius一条命，经过石门和旧盐场行动后，已经成为经过危险验证的可靠行动伙伴。你们互信，但并不等于彼此毫无保留。",
+    },
+    {
+        "title": "莉娅与断线会",
+        "keywords": ["莉娅", "莉亚", "断线会", "蓝线"],
+        "answer": "莉娅是28岁的断线会联络人，表面是纺织工匠，擅长联络、路线、伪装与线务。她坚持不滥杀、不背叛、不无谓冒险。蓝线与断线会存在叙事交叉，但没有证据证明断线会参与鸟网。",
+    },
+    {
+        "title": "闭眼组织",
+        "keywords": ["闭眼", "果园", "树洞", "暗门"],
+        "answer": "闭眼组织知道新乌鸦已经出现。废弃果园的枯苹果树里有交接木盒，附近还有地下暗门；他们暂时不知道Julius已经反向发现了他们。闭眼组织、守夜人和凶手势力之间的关系仍未证实。",
+    },
+    {
+        "title": "守夜人与石门",
+        "keywords": ["守夜人", "司门人", "石门", "罗维克", "钥匙"],
+        "answer": "守夜人负责防止门被错误的人找到，司门人决定门何时应该打开。罗维克属于守夜人体系。三把钥匙只是工具，重要的可能是“谁把钥匙带到门前”。目前石门保持关闭，因为有人似乎希望Julius去打开它。",
+    },
+    {
+        "title": "上一任乌鸦",
+        "keywords": ["上一任", "死亡", "钟表铺", "凶手"],
+        "answer": "上一任乌鸦死在北区废弃钟表铺地下室。主钥匙、黑皮册子和一封信失踪，普通财物却没有被洗劫。有人在他死后动过传承遗物，但凶手是个人还是组织仍未知。",
+    },
+    {
+        "title": "鸟网",
+        "keywords": ["鸟网", "煤球", "脚环", "三号", "四号", "银灰细针"],
+        "answer": "鸟网用抓捕、训练、脚环、药针和接力放飞建立鸟类情报链。煤球已获救，三号据点被端掉，四号被潜入；它们只是网络节点，不再继续机械扩成五号六号。漆黑完成了一次重要的空中反跟踪。",
+    },
+]
+
+STORY_SUMMARY = "\n".join(f"- {item['title']}: {item['answer']}" for item in LORE)
+
+
+def answer_local(question: str) -> str:
+    normalized = question.strip().lower()
+    if not normalized:
+        return "你得先问点什么。读心术不在我的技能表里，嘎。"
+    scored = []
+    for item in LORE:
+        score = sum(2 if keyword.lower() in normalized else 0 for keyword in item["keywords"])
+        score += sum(1 for word in normalized if word and word in item["title"].lower())
+        scored.append((score, item))
+    score, best = max(scored, key=lambda pair: pair[0])
+    if score:
+        return best["answer"]
+    return "这条我在现有冒险档案里没找到可靠记录。可以把它当作待调查线索，但别让我现场编供词。嘎。"
+
+
+def ask_openai(question: str, history: list[dict[str, str]] | None = None) -> str:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return answer_local(question)
+    conversation = "\n".join(
+        f"{turn.get('role', 'user')}: {turn.get('content', '')}" for turn in (history or [])[-6:]
+    )
+    payload = {
+        "model": os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini"),
+        "instructions": PERSONA + "\n以下是当前战役档案：\n" + STORY_SUMMARY,
+        "input": (conversation + "\nuser: " + question).strip(),
+        "max_output_tokens": 500,
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        parts = []
+        for output in data.get("output", []):
+            for content in output.get("content", []):
+                if content.get("type") == "output_text":
+                    parts.append(content.get("text", ""))
+        return "\n".join(parts).strip() or answer_local(question)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError) as error:
+        return f"联网情报渠道暂时失联（{type(error).__name__}）。\n\n本地档案答复：{answer_local(question)}"
+
+
+DICE_PATTERN = re.compile(r"^\s*(?:(\d{1,2})d)?(4|6|8|10|12|20|100)(?:\s*([+-])\s*(\d{1,3}))?\s*$", re.I)
+
+
+def roll_dice(expression: str) -> dict[str, Any]:
+    match = DICE_PATTERN.match(expression)
+    if not match:
+        raise ValueError("骰式应类似 d20、2d6+3 或 1d100-10")
+    count = int(match.group(1) or 1)
+    sides = int(match.group(2))
+    if not 1 <= count <= 20:
+        raise ValueError("一次最多投20枚骰子")
+    modifier = int(match.group(4) or 0) * (-1 if match.group(3) == "-" else 1)
+    rolls = [random.randint(1, sides) for _ in range(count)]
+    total = sum(rolls) + modifier
+    natural = rolls[0] if count == 1 else None
+    if sides == 20 and natural == 20:
+        comment = "自然20。连命运都决定配合你一次，嘎。"
+    elif sides == 20 and natural == 1:
+        comment = "自然1。很好，至少灾难来得很坦诚。"
+    elif total >= sides * count * 0.8 + modifier:
+        comment = "不错。这次骰子没有背叛你。"
+    elif total <= sides * count * 0.25 + modifier:
+        comment = "我建议把这次结果归档为敌方情报。"
+    else:
+        comment = "结果普通，但活下来通常靠的就是普通。"
+    return {"expression": expression.strip().lower(), "rolls": rolls, "modifier": modifier, "total": total, "comment": comment}
+
+
+class MemoStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.items: list[dict[str, Any]] = self._load()
+
+    def _load(self) -> list[dict[str, Any]]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except (OSError, json.JSONDecodeError):
+            return []
+
+    def save(self) -> None:
+        self.path.write_text(json.dumps(self.items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def add(self, text: str, remind_at: str = "") -> None:
+        text = text.strip()
+        if not text:
+            raise ValueError("备忘内容不能为空")
+        reminder = None
+        if remind_at.strip():
+            reminder = datetime.strptime(remind_at.strip(), "%Y-%m-%d %H:%M").isoformat(timespec="minutes")
+        self.items.append({
+            "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+            "text": text,
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "remind_at": reminder,
+            "done": False,
+            "notified": False,
+        })
+        self.save()
+
+    def due(self) -> list[dict[str, Any]]:
+        now = datetime.now()
+        result = []
+        for item in self.items:
+            remind_at = item.get("remind_at")
+            if remind_at and not item.get("done") and not item.get("notified"):
+                if datetime.fromisoformat(remind_at) <= now:
+                    item["notified"] = True
+                    result.append(item)
+        if result:
+            self.save()
+        return result
