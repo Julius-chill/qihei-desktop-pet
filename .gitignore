@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+pet_state.json
+assets/models/
+assets/qihei*.png
+assets/raven_2d_concept_v2.png
+assets/raven_2d_concept_v3.png
+preview_3d.py
+tools/
+启动3D预览.bat
