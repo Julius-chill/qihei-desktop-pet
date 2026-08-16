@@ -472,10 +472,18 @@ class QiheiPet:
         width = 310
         self.bubble_canvas.configure(width=width, height=height)
         self.bubble_canvas.delete("all")
+        bubble_x = min(
+            max(8, self.root.winfo_x() - width + PET_SIZE // 2 + 25),
+            self.root.winfo_screenwidth() - width - 8,
+        )
+        pet_center_x = self.root.winfo_x() + PET_SIZE // 2
+        tail_tip = min(width - 25, max(30, pet_center_x - bubble_x))
+        tail_left = max(18, tail_tip - 25)
+        tail_right = min(width - 15, tail_tip + 16)
         points = [
             15, 8, width - 15, 8, width - 5, 18, width - 5, height - 34,
-            width - 15, height - 24, 72, height - 24, 52, height - 5,
-            55, height - 24, 15, height - 24, 5, height - 34, 5, 18,
+            width - 15, height - 24, tail_right, height - 24, tail_tip, height - 5,
+            tail_left, height - 24, 15, height - 24, 5, height - 34, 5, 18,
         ]
         self.bubble_canvas.create_polygon(
             points, smooth=True, splinesteps=18, fill="#171923",
@@ -494,7 +502,7 @@ class QiheiPet:
 
     def place_bubble(self) -> None:
         width, height = int(self.bubble_canvas["width"]), int(self.bubble_canvas["height"])
-        x = min(max(8, self.root.winfo_x() - width + PET_SIZE // 2),
+        x = min(max(8, self.root.winfo_x() - width + PET_SIZE // 2 + 25),
                 self.root.winfo_screenwidth() - width - 8)
         self.bubble.geometry(f"+{x}+{max(8, self.root.winfo_y() - height + 20)}")
 
