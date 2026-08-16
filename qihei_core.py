@@ -6,6 +6,7 @@ import random
 import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,132 @@ LORE = [
 ]
 
 STORY_SUMMARY = "\n".join(f"- {item['title']}: {item['answer']}" for item in LORE)
+
+
+@dataclass
+class CompanionProgress:
+    """Persistent bond and D&D scouting progression for Qihei."""
+
+    bond: int = 20
+    experience: int = 0
+    energy: float = 82.0
+    morale: int = 10
+    scout_xp: int = 0
+    intel_tokens: int = 0
+    daily: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    ACTIONS = {
+        "pet": (1, 2, 1, 3),          # bond, morale, xp, daily rewarding limit
+        "conversation": (1, 1, 2, 5),
+        "story": (1, 2, 2, 3),
+        "flight": (0, 1, 1, 6),
+        "focus": (2, 2, 4, 3),
+    }
+    LEVEL_XP = (0, 18, 45, 85, 140)
+    SCOUT_XP = (0, 12, 32, 65, 110)
+    ABILITIES = ("锐眼", "无声掠影", "线索嗅觉", "鸦群联络", "昨日回声")
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "CompanionProgress":
+        data = data if isinstance(data, dict) else {}
+        return cls(
+            bond=max(0, min(100, int(data.get("bond", data.get("affection", 20))))),
+            experience=max(0, int(data.get("experience", 0))),
+            energy=max(0.0, min(100.0, float(data.get("energy", 82)))),
+            morale=max(-100, min(100, int(data.get("morale", 10)))),
+            scout_xp=max(0, int(data.get("scout_xp", 0))),
+            intel_tokens=max(0, min(3, int(data.get("intel_tokens", 0)))),
+            daily=data.get("daily", {}) if isinstance(data.get("daily", {}), dict) else {},
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "bond": self.bond, "experience": self.experience,
+            "energy": round(self.energy, 1), "morale": self.morale,
+            "scout_xp": self.scout_xp, "intel_tokens": self.intel_tokens, "daily": self.daily,
+        }
+
+    @staticmethod
+    def _level(value: int, thresholds: tuple[int, ...]) -> int:
+        return max(i + 1 for i, threshold in enumerate(thresholds) if value >= threshold)
+
+    @property
+    def level(self) -> int:
+        return self._level(self.experience, self.LEVEL_XP)
+
+    @property
+    def scout_level(self) -> int:
+        return self._level(self.scout_xp, self.SCOUT_XP)
+
+    @property
+    def bond_rank(self) -> str:
+        if self.bond >= 80:
+            return "生死同伴"
+        if self.bond >= 55:
+            return "默契搭档"
+        if self.bond >= 30:
+            return "可信伙伴"
+        return "谨慎观察"
+
+    @property
+    def mood(self) -> str:
+        if self.energy < 18:
+            return "疲惫"
+        if self.morale >= 55:
+            return "振奋"
+        if self.morale >= 15:
+            return "愉快"
+        if self.morale <= -35:
+            return "烦躁"
+        return "冷静"
+
+    @property
+    def ability(self) -> str:
+        return self.ABILITIES[min(self.scout_level, len(self.ABILITIES)) - 1]
+
+    def record(self, action: str) -> str:
+        if action not in self.ACTIONS:
+            return ""
+        today = datetime.now().date().isoformat()
+        day = self.daily.setdefault(today, {})
+        bond, morale, xp, limit = self.ACTIONS[action]
+        used = int(day.get(action, 0))
+        day[action] = used + 1
+        self.daily = {key: value for key, value in self.daily.items() if key >= today}
+        if used >= limit:
+            return "今天这类互动的成长已经记满了。陪伴不是刷经验，嘎。"
+        old_level, old_scout = self.level, self.scout_level
+        self.bond = min(100, self.bond + bond)
+        self.morale = max(-100, min(100, self.morale + morale))
+        self.experience += xp
+        if action == "flight":
+            self.scout_xp += 2
+            self.energy = max(0, self.energy - 2.5)
+        unlocks = []
+        if self.level > old_level:
+            unlocks.append(f"羁绊等级提升到 {self.level}")
+        if self.scout_level > old_scout:
+            unlocks.append(f"侦察能力解锁：{self.ability}")
+        return "；".join(unlocks)
+
+    def scout(self, dc: int = 13, natural: int | None = None) -> dict[str, Any]:
+        if self.energy < 8:
+            return {"ok": False, "text": "精力不足。现在出发只会给敌人送一只困鸟。"}
+        die = natural if natural is not None else random.randint(1, 20)
+        bond_bonus = 2 if self.bond >= 80 else 1 if self.bond >= 45 else 0
+        mood_bonus = 1 if self.mood in {"愉快", "振奋"} else -2 if self.mood == "疲惫" else -1 if self.mood == "烦躁" else 0
+        modifier = self.scout_level + bond_bonus + mood_bonus
+        total = die + modifier
+        self.energy = max(0, self.energy - 7)
+        self.scout_xp += 3 if total >= dc else 1
+        quality = "关键线索" if die == 20 or total >= dc + 5 else "可靠情报" if total >= dc else "模糊迹象" if total >= dc - 3 else "无功而返"
+        if total >= dc:
+            self.intel_tokens = min(3, self.intel_tokens + 1)
+        return {
+            "ok": True, "die": die, "modifier": modifier, "total": total,
+            "dc": dc, "success": total >= dc, "quality": quality,
+            "text": f"侦察检定 d20({die}) {modifier:+d} = {total}，DC {dc}：{quality}。",
+        }
 
 
 def answer_local(question: str) -> str:

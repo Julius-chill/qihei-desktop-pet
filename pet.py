@@ -13,7 +13,7 @@ from tkinter import messagebox
 
 from PIL import Image, ImageOps, ImageTk
 
-from qihei_core import MemoStore, STORY_SUMMARY, ask_openai, roll_dice
+from qihei_core import CompanionProgress, MemoStore, STORY_SUMMARY, ask_openai, roll_dice
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
@@ -74,8 +74,10 @@ class QiheiPet:
         self.flight: dict[str, float] | None = None
         self.action: dict[str, float | str] | None = None
         self.sleeping = False
-        self.affection = int(state.get("affection", 20))
-        self.energy = float(state.get("energy", 82))
+        progress_data = state.get("companion", {})
+        if not progress_data:
+            progress_data = {"affection": state.get("affection", 20), "energy": state.get("energy", 82)}
+        self.progress = CompanionProgress.from_dict(progress_data)
         self.last_vitals_update = time.time()
         self.drag_origin: tuple[int, int] | None = None
         self.dragged = False
@@ -83,6 +85,7 @@ class QiheiPet:
         self.animation_paused = tk.BooleanVar(value=False)
         self.follow_cursor = tk.BooleanVar(value=False)
         self.bubble_timer: str | None = None
+        self.bubble_type_timer: str | None = None
         self.frames: dict[str, list[Image.Image]] = {}
         self.tk_image: ImageTk.PhotoImage | None = None
         self.last_render: tuple[str, int, bool] | None = None
@@ -94,19 +97,21 @@ class QiheiPet:
         self.bubble.withdraw()
         self.bubble.overrideredirect(True)
         self.bubble.attributes("-topmost", True)
-        self.bubble.configure(bg="#202334", padx=2, pady=2)
-        self.bubble_label = tk.Label(
-            self.bubble, bg="#f7f4eb", fg="#242331",
-            font=("Microsoft YaHei UI", 9), wraplength=235, padx=11, pady=8,
-        )
-        self.bubble_label.pack()
+        self.bubble.configure(bg=TRANSPARENT)
+        self.bubble.wm_attributes("-transparentcolor", TRANSPARENT)
+        self.bubble_canvas = tk.Canvas(self.bubble, width=310, height=130, bg=TRANSPARENT, highlightthickness=0)
+        self.bubble_canvas.pack()
+        self.bubble_text_item: int | None = None
+        self.draw_bubble(130)
 
         self.menu = tk.Menu(self.root, tearoff=False, font=("Microsoft YaHei UI", 9))
         self.menu.add_command(label="让漆黑说句话", command=lambda: self.say(random.choice(IDLE_LINES)))
-        self.menu.add_command(label="出去飞一圈", command=self.start_flight)
+        self.menu.add_command(label="出去飞一圈", command=lambda: self.start_flight(True))
         self.menu.add_command(label="摸摸漆黑", command=self.pet_qihei)
         self.menu.add_command(label="休息 / 醒来", command=self.toggle_sleep)
         self.menu.add_command(label="状态", command=self.show_status)
+        self.menu.add_command(label="羁绊与养成", command=self.open_companion_window)
+        self.menu.add_command(label="DND侦察行动", command=self.open_scout_window)
         self.menu.add_command(label="专注计时", command=self.open_focus_window)
         self.menu.add_command(label="向漆黑提问", command=self.open_question_window)
         self.menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
@@ -129,7 +134,7 @@ class QiheiPet:
         self.canvas.bind("<ButtonPress-1>", self.start_drag)
         self.canvas.bind("<B1-Motion>", self.drag)
         self.canvas.bind("<ButtonRelease-1>", self.end_drag)
-        self.canvas.bind("<Double-Button-1>", lambda _event: self.start_flight())
+        self.canvas.bind("<Double-Button-1>", lambda _event: self.start_flight(True))
         self.canvas.bind("<Button-3>", self.show_menu)
         self.restore_position(state)
         self.load_style_image()
@@ -139,6 +144,22 @@ class QiheiPet:
         self.schedule_chatter()
         self.root.after(5000, self.check_reminders)
         self.root.after(60000, self.update_vitals)
+
+    @property
+    def affection(self) -> int:
+        return self.progress.bond
+
+    @affection.setter
+    def affection(self, value: int) -> None:
+        self.progress.bond = max(0, min(100, value))
+
+    @property
+    def energy(self) -> float:
+        return self.progress.energy
+
+    @energy.setter
+    def energy(self, value: float) -> None:
+        self.progress.energy = max(0.0, min(100.0, value))
 
     def load_state(self) -> dict[str, object]:
         try:
@@ -329,6 +350,10 @@ class QiheiPet:
             if self.bubble.state() == "normal":
                 self.place_bubble()
             if progress >= 1:
+                if self.flight.get("reward"):
+                    unlock = self.progress.record("flight")
+                    if unlock:
+                        self.say(unlock, 5200)
                 self.flight = None
                 self.save_state()
                 self.root.after(random.randint(24000, 45000), self.start_flight)
@@ -377,8 +402,12 @@ class QiheiPet:
         breath = (0, 0, 0, 0, min(1, frame_count - 1), min(1, frame_count - 1), 0, 0, 0, 0)
         return breath[int((now - self.started) * 2) % len(breath)]
 
-    def start_flight(self) -> None:
+    def start_flight(self, reward: bool = False) -> None:
         if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
+            return
+        if self.energy < 10:
+            if reward:
+                self.say("今天的翅膀已经提交休整申请。让我睡一会儿再侦察。", 5200)
             return
         sx, sy = self.root.winfo_x(), self.root.winfo_y()
         max_x = max(15, self.root.winfo_screenwidth() - PET_SIZE - 15)
@@ -398,6 +427,7 @@ class QiheiPet:
         self.flight = {
             "start": time.perf_counter(), "duration": random.uniform(2.4, 3.8),
             "sx": sx, "sy": sy, "tx": tx, "ty": ty, "arc": random.randint(55, 120),
+            "reward": reward,
         }
 
     def restore_position(self, state: dict[str, object]) -> None:
@@ -411,20 +441,59 @@ class QiheiPet:
 
     def save_state(self) -> None:
         data = {"x": self.root.winfo_x(), "y": self.root.winfo_y(), "style": self.style.get(),
-                "affection": self.affection, "energy": round(self.energy, 1)}
+                "companion": self.progress.to_dict()}
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def say(self, text: str, duration: int = 4800) -> None:
         if self.bubble_timer:
             self.root.after_cancel(self.bubble_timer)
-        self.bubble_label.configure(text=text)
+        if self.bubble_type_timer:
+            self.root.after_cancel(self.bubble_type_timer)
+        height = max(112, min(190, 78 + ((len(text) + 18) // 19) * 20))
+        self.draw_bubble(height)
         self.bubble.update_idletasks()
         self.place_bubble()
         self.bubble.deiconify()
+        index = 0
+
+        def type_next() -> None:
+            nonlocal index
+            index = min(len(text), index + 2)
+            self.bubble_canvas.itemconfigure(self.bubble_text_item, text=text[:index])
+            if index < len(text):
+                self.bubble_type_timer = self.root.after(22, type_next)
+            else:
+                self.bubble_type_timer = None
+
+        type_next()
         self.bubble_timer = self.root.after(duration, self.hide_bubble)
 
+    def draw_bubble(self, height: int) -> None:
+        width = 310
+        self.bubble_canvas.configure(width=width, height=height)
+        self.bubble_canvas.delete("all")
+        points = [
+            15, 8, width - 15, 8, width - 5, 18, width - 5, height - 34,
+            width - 15, height - 24, 72, height - 24, 52, height - 5,
+            55, height - 24, 15, height - 24, 5, height - 34, 5, 18,
+        ]
+        self.bubble_canvas.create_polygon(
+            points, smooth=True, splinesteps=18, fill="#171923",
+            outline="#b63a32", width=2,
+        )
+        self.bubble_canvas.create_line(18, 34, width - 18, 34, fill="#6f542c", width=1)
+        self.bubble_canvas.create_oval(18, 17, 25, 24, fill="#d43b32", outline="")
+        self.bubble_canvas.create_text(
+            31, 21, text=f"漆黑 · {self.progress.mood}", anchor="w",
+            fill="#d5aa53", font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        self.bubble_text_item = self.bubble_canvas.create_text(
+            18, 45, text="", anchor="nw", width=274, justify="left",
+            fill="#f0ede4", font=("Microsoft YaHei UI", 9),
+        )
+
     def place_bubble(self) -> None:
-        width, height = self.bubble.winfo_reqwidth(), self.bubble.winfo_reqheight()
+        width, height = int(self.bubble_canvas["width"]), int(self.bubble_canvas["height"])
         x = min(max(8, self.root.winfo_x() - width + PET_SIZE // 2),
                 self.root.winfo_screenwidth() - width - 8)
         self.bubble.geometry(f"+{x}+{max(8, self.root.winfo_y() - height + 20)}")
@@ -442,6 +511,8 @@ class QiheiPet:
         return window
 
     def open_story_window(self) -> None:
+        self.progress.record("story")
+        self.save_state()
         window = self.make_tool_window("漆黑的冒险档案", "620x520")
         text = tk.Text(
             window, bg="#202433", fg="#eee9dc", insertbackground="#eee9dc",
@@ -476,6 +547,10 @@ class QiheiPet:
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": answer},
             ])
+            unlock = self.progress.record("conversation")
+            self.save_state()
+            if unlock:
+                self.say(unlock, 5200)
 
         def ask() -> None:
             user_text = question.get().strip()
@@ -535,6 +610,22 @@ class QiheiPet:
         quick.pack(fill="x", padx=10)
         for sides in (4, 6, 8, 10, 12, 20, 100):
             tk.Button(quick, text=f"d{sides}", command=lambda s=sides: roll(f"d{s}"), width=5).pack(side="left", padx=2)
+
+        def roll_intel_advantage() -> None:
+            if self.progress.intel_tokens <= 0:
+                result_label.configure(text="没有可用的情报优势。先让漆黑执行一次成功侦察。")
+                return
+            first, second = roll_dice("d20"), roll_dice("d20")
+            kept = max(first["total"], second["total"])
+            self.progress.intel_tokens -= 1
+            self.save_state()
+            line = f"情报优势 d20 → {kept}  [{first['total']}, {second['total']}]"
+            history.insert(0, line)
+            result_label.configure(text=f"情报优势：掷出 {first['total']} 与 {second['total']}，取 {kept}\n剩余 {self.progress.intel_tokens} 次")
+            self.say(f"情报优势：{first['total']}、{second['total']}，取 {kept}。我看见的路不会白看。", 6200)
+
+        tk.Button(window, text=f"使用情报优势（{self.progress.intel_tokens}）", command=roll_intel_advantage,
+                  bg="#6e2632", fg="white").pack(pady=(4, 10))
         expression.bind("<Return>", lambda _event: roll())
 
     def open_memo_window(self) -> None:
@@ -610,12 +701,14 @@ class QiheiPet:
         else:
             now = time.perf_counter()
             self.action = {"name": "touch", "started": now, "until": now + 0.7}
-            self.affection = min(100, self.affection + 1)
+            unlock = self.progress.record("pet")
             self.say(random.choice([
                 "只准一下。……再一下也不是不行。",
                 "嘎。手法尚可，勉强记一分。",
                 "别碰眼睛。羽冠可以。",
             ]), 3600)
+            if unlock:
+                self.root.after(3700, lambda: self.say(unlock, 5000))
         self.save_state()
 
     def toggle_sleep(self) -> None:
@@ -635,6 +728,7 @@ class QiheiPet:
         self.last_vitals_update = now
         if self.sleeping:
             self.energy = min(100, self.energy + minutes * 1.8)
+            self.progress.morale = min(100, self.progress.morale + round(minutes * 0.25))
         else:
             self.energy = max(0, self.energy - minutes * 0.12)
         if self.energy < 18 and not self.sleeping and random.random() < 0.35:
@@ -643,9 +737,82 @@ class QiheiPet:
         self.root.after(60000, self.update_vitals)
 
     def show_status(self) -> None:
-        mood = "信任你" if self.affection >= 70 else "逐渐熟悉" if self.affection >= 35 else "保持观察"
         mode = "休息中" if self.sleeping else "巡查中"
-        self.say(f"状态：{mode}\n精力 {round(self.energy)} / 100 · 默契 {self.affection} / 100\n评价：{mood}", 6500)
+        self.say(
+            f"{mode} · {self.progress.mood}\n"
+            f"羁绊 Lv.{self.progress.level}「{self.progress.bond_rank}」 · 亲密 {self.progress.bond}\n"
+            f"侦察 Lv.{self.progress.scout_level}「{self.progress.ability}」 · 精力 {round(self.energy)}",
+            7600,
+        )
+
+    def open_companion_window(self) -> None:
+        window = self.make_tool_window("漆黑 · 羁绊与养成", "560x430")
+        title = tk.Label(window, text=f"漆黑  Lv.{self.progress.level}　{self.progress.bond_rank}",
+                         bg="#181b27", fg="#d5aa53", font=("Microsoft YaHei UI", 15, "bold"))
+        title.pack(pady=(18, 4))
+        tk.Label(window, text=f"当前心情：{self.progress.mood}　|　侦察能力：{self.progress.ability}",
+                 bg="#181b27", fg="#eee9dc", font=("Microsoft YaHei UI", 10)).pack(pady=(0, 14))
+
+        panel = tk.Frame(window, bg="#202433", padx=18, pady=14)
+        panel.pack(fill="x", padx=18)
+
+        def meter(label: str, value: float, color: str) -> None:
+            row = tk.Frame(panel, bg="#202433")
+            row.pack(fill="x", pady=5)
+            tk.Label(row, text=label, width=9, anchor="w", bg="#202433", fg="#eee9dc").pack(side="left")
+            canvas = tk.Canvas(row, height=14, bg="#11131b", highlightthickness=0)
+            canvas.pack(side="left", fill="x", expand=True, padx=6)
+            canvas.create_rectangle(0, 0, max(1, value) * 3.2, 14, fill=color, outline="")
+            tk.Label(row, text=f"{round(value)}/100", width=8, bg="#202433", fg="#aaa7a0").pack(side="right")
+
+        meter("亲密度", self.progress.bond, "#b63a32")
+        meter("精力", self.progress.energy, "#4f7893")
+        meter("士气", (self.progress.morale + 100) / 2, "#d5aa53")
+        tk.Label(
+            window,
+            text=(f"羁绊经验：{self.progress.experience}　|　侦察经验：{self.progress.scout_xp}\n"
+                  f"可用情报优势：{self.progress.intel_tokens}/3\n\n"
+                  "互动、共同专注、讨论冒险会提升羁绊；飞行与侦察提升侦察能力。\n"
+                  "重复互动有每日成长上限，休息会恢复精力与士气。"),
+            bg="#181b27", fg="#d8d4ca", justify="left", wraplength=500,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(padx=22, pady=18, anchor="w")
+
+    def open_scout_window(self) -> None:
+        window = self.make_tool_window("漆黑 · DND侦察行动", "600x470")
+        tk.Label(window, text="选择侦察目标", bg="#181b27", fg="#d5aa53",
+                 font=("Microsoft YaHei UI", 14, "bold")).pack(pady=(16, 8))
+        result = tk.Text(window, height=10, bg="#202433", fg="#eee9dc", wrap="word",
+                         font=("Microsoft YaHei UI", 10), padx=12, pady=10)
+        result.pack(fill="both", expand=True, padx=14, pady=10)
+        missions = [
+            ("旧钟楼外围", 11, "检查脚印、窗沿、钟绳和近期进入痕迹。"),
+            ("鸟网残余路线", 13, "追踪脚环、放飞点和可能仍在工作的接力节点。"),
+            ("石门监视者", 16, "高风险监视：确认谁在等待新乌鸦接近石门。"),
+        ]
+
+        def scout(name: str, dc: int, description: str) -> None:
+            outcome = self.progress.scout(dc)
+            result.delete("1.0", "end")
+            if not outcome["ok"]:
+                result.insert("end", outcome["text"])
+                self.say(outcome["text"], 5200)
+                return
+            narrative = {
+                "关键线索": "漆黑锁定了可交叉验证的异常细节。下一次相关剧情判定可使用情报优势。",
+                "可靠情报": "路线和时间点能够相互印证。获得一次情报优势。",
+                "模糊迹象": "发现异常，但尚不足以下结论；这是一条待复查线索。",
+                "无功而返": "没有找到可靠痕迹。漆黑拒绝把猜测伪装成情报。",
+            }[outcome["quality"]]
+            result.insert("end", f"目标：{name}\n{description}\n\n{outcome['text']}\n\n{narrative}")
+            self.save_state()
+            self.say(f"{name}：{outcome['quality']}。{narrative}", 7600)
+
+        buttons = tk.Frame(window, bg="#181b27")
+        buttons.pack(fill="x", padx=12, pady=(2, 14))
+        for name, dc, description in missions:
+            tk.Button(buttons, text=f"{name}\nDC {dc}", width=17, height=2,
+                      command=lambda n=name, d=dc, desc=description: scout(n, d, desc)).pack(side="left", padx=4)
 
     def open_focus_window(self) -> None:
         window = self.make_tool_window("漆黑的专注哨", "430x245")
@@ -663,7 +830,14 @@ class QiheiPet:
             duration = minutes.get()
             status.configure(text=f"计时 {duration} 分钟。开始，别切窗口。")
             self.say(f"专注哨开始：{duration} 分钟。我盯着时间，你盯着任务。", 5200)
-            self.root.after(duration * 60 * 1000, lambda: self.say("专注时间到。停手，伸展，喝水。命令，不是建议。", 10000))
+            def complete() -> None:
+                unlock = self.progress.record("focus")
+                self.save_state()
+                message = "专注时间到。停手，伸展，喝水。命令，不是建议。"
+                if unlock:
+                    message += "\n" + unlock
+                self.say(message, 10000)
+            self.root.after(duration * 60 * 1000, complete)
 
         tk.Button(window, text="开始专注", command=start, width=14).pack(pady=6)
 
@@ -677,7 +851,14 @@ class QiheiPet:
 
     def idle_chatter(self) -> None:
         if not self.quiet:
-            self.say(random.choice(IDLE_LINES))
+            mood_lines = {
+                "疲惫": ["我不是闭眼。我是在降低视觉频道功耗。", "今天先别开石门。连我都困了。"],
+                "振奋": ["空域清晰，脑子也清晰。今天适合抓住一条大线索。", "嘎。给我一个方向，我能把秘密从屋顶上揪出来。"],
+                "愉快": ["今日情报：和你搭档，暂时不算坏差事。", "桌面很安静。我喜欢安静里藏着线索。"],
+                "烦躁": ["先说好，我心情不好时仍然专业，只是评论会更诚实。", "今天的风向和某些人的判断一样糟。"],
+                "冷静": IDLE_LINES,
+            }
+            self.say(random.choice(mood_lines[self.progress.mood]))
         self.schedule_chatter()
 
     def toggle_quiet(self) -> None:
