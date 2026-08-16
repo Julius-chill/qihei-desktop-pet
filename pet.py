@@ -746,7 +746,8 @@ class QiheiPet:
         )
 
     def open_companion_window(self) -> None:
-        window = self.make_tool_window("漆黑 · 羁绊与养成", "560x430")
+        window = self.make_tool_window("漆黑 · 羁绊与养成", "640x470")
+        window.minsize(560, 440)
         title = tk.Label(window, text=f"漆黑  Lv.{self.progress.level}　{self.progress.bond_rank}",
                          bg="#181b27", fg="#d5aa53", font=("Microsoft YaHei UI", 15, "bold"))
         title.pack(pady=(18, 4))
@@ -755,15 +756,28 @@ class QiheiPet:
 
         panel = tk.Frame(window, bg="#202433", padx=18, pady=14)
         panel.pack(fill="x", padx=18)
+        panel.columnconfigure(1, weight=1)
 
         def meter(label: str, value: float, color: str) -> None:
-            row = tk.Frame(panel, bg="#202433")
-            row.pack(fill="x", pady=5)
-            tk.Label(row, text=label, width=9, anchor="w", bg="#202433", fg="#eee9dc").pack(side="left")
-            canvas = tk.Canvas(row, height=14, bg="#11131b", highlightthickness=0)
-            canvas.pack(side="left", fill="x", expand=True, padx=6)
-            canvas.create_rectangle(0, 0, max(1, value) * 3.2, 14, fill=color, outline="")
-            tk.Label(row, text=f"{round(value)}/100", width=8, bg="#202433", fg="#aaa7a0").pack(side="right")
+            row = panel.grid_size()[1]
+            tk.Label(panel, text=label, width=8, anchor="w", bg="#202433", fg="#eee9dc").grid(
+                row=row, column=0, sticky="w", pady=6, padx=(0, 8)
+            )
+            canvas = tk.Canvas(panel, height=15, width=360, bg="#11131b", highlightthickness=0)
+            canvas.grid(row=row, column=1, sticky="ew", pady=6)
+            value_label = tk.Label(
+                panel, text=f"{round(value):>3}/100", width=9, anchor="e",
+                bg="#202433", fg="#d8d4ca", font=("Consolas", 10),
+            )
+            value_label.grid(row=row, column=2, sticky="e", pady=6, padx=(12, 2))
+
+            def redraw(event: tk.Event) -> None:
+                canvas.delete("fill")
+                width = max(1, event.width)
+                canvas.create_rectangle(0, 0, width * max(0, min(100, value)) / 100, 15,
+                                        fill=color, outline="", tags="fill")
+
+            canvas.bind("<Configure>", redraw)
 
         meter("亲密度", self.progress.bond, "#b63a32")
         meter("精力", self.progress.energy, "#4f7893")
