@@ -208,13 +208,14 @@ class QiheiPet:
         return frames
 
     @staticmethod
-    def clean_specks(image: Image.Image, minimum_size: int = 4) -> Image.Image:
-        """Remove tiny disconnected alpha islands left by generated sprite sheets."""
+    def clean_specks(image: Image.Image) -> Image.Image:
+        """Keep the pet body and remove disconnected fragments from adjacent cells."""
         result = image.copy()
         alpha = result.getchannel("A").point(lambda value: 0 if value < 40 else value)
         pixels = alpha.load()
         width, height = alpha.size
         visited: set[tuple[int, int]] = set()
+        components: list[list[tuple[int, int]]] = []
         for start_y in range(height):
             for start_x in range(width):
                 if not pixels[start_x, start_y] or (start_x, start_y) in visited:
@@ -229,9 +230,18 @@ class QiheiPet:
                         if 0 <= nx < width and 0 <= ny < height and pixels[nx, ny] and (nx, ny) not in visited:
                             visited.add((nx, ny))
                             stack.append((nx, ny))
-                if len(component) < minimum_size:
-                    for x, y in component:
-                        pixels[x, y] = 0
+                components.append(component)
+
+        if components:
+            largest = max(components, key=len)
+            # A generated sheet can leak a sizeable piece of the neighbouring
+            # frame into a cell, so a fixed four-pixel threshold is insufficient.
+            # Qihei's body, eye and feather accents share one alpha component.
+            for component in components:
+                if component is largest:
+                    continue
+                for x, y in component:
+                    pixels[x, y] = 0
         result.putalpha(alpha)
         return result
 
