@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from qihei_core import CompanionProgress, MemoStore, answer_local, roll_dice
+from pet import QiheiPet
 
 
 class DiceTests(unittest.TestCase):
@@ -56,6 +57,16 @@ class CompanionTests(unittest.TestCase):
     def test_tired_companion_cannot_scout(self):
         result = CompanionProgress(energy=5).scout()
         self.assertFalse(result["ok"])
+
+
+class AnimationDirectionTests(unittest.TestCase):
+    def test_pixel_sheet_faces_left(self):
+        self.assertFalse(QiheiPet.should_mirror_for_flight("pixel", 500, 100))
+        self.assertTrue(QiheiPet.should_mirror_for_flight("pixel", 100, 500))
+
+    def test_realistic_sheet_faces_right(self):
+        self.assertFalse(QiheiPet.should_mirror_for_flight("realistic", 100, 500))
+        self.assertTrue(QiheiPet.should_mirror_for_flight("realistic", 500, 100))
 
 
 if __name__ == "__main__":

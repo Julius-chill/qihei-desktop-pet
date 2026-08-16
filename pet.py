@@ -347,8 +347,6 @@ class QiheiPet:
             y = (self.flight["sy"] + (self.flight["ty"] - self.flight["sy"]) * smooth
                  - math.sin(math.pi * progress) * self.flight["arc"])
             self.root.geometry(f"+{int(x)}+{int(y)}")
-            if self.bubble.state() == "normal":
-                self.place_bubble()
             if progress >= 1:
                 if self.flight.get("reward"):
                     unlock = self.progress.record("flight")
@@ -380,6 +378,10 @@ class QiheiPet:
         self.render_image(state, frame_index)
         bob = math.sin((now - self.started) * 8) * 2 if self.flight else 0
         self.canvas.coords(self.image_item, PET_SIZE // 2, PET_SIZE // 2 + bob)
+        # Follow every kind of movement, including dragging, style changes and
+        # autonomous flight. Previously this only ran inside the flight branch.
+        if self.bubble.state() == "normal":
+            self.place_bubble()
         self.root.after(33, self.tick)
 
     def idle_frame(self, now: float) -> int:
@@ -419,8 +421,9 @@ class QiheiPet:
             tx, ty = random.randint(15, max_x), random.randint(15, max_y)
         if abs(tx - sx) < 260:
             tx = 15 if sx > max_x / 2 else max_x
-        # Source sheets face left. Mirror only when travelling to the right.
-        should_mirror = tx > sx
+        # The generated pixel sheet faces left, while the realistic sheet faces
+        # right. Each appearance therefore needs its own mirroring rule.
+        should_mirror = self.should_mirror_for_flight(self.style.get(), sx, tx)
         if should_mirror != self.facing_left:
             self.facing_left = should_mirror
             self.last_render = None
@@ -429,6 +432,11 @@ class QiheiPet:
             "sx": sx, "sy": sy, "tx": tx, "ty": ty, "arc": random.randint(55, 120),
             "reward": reward,
         }
+
+    @staticmethod
+    def should_mirror_for_flight(style: str, source_x: float, target_x: float) -> bool:
+        source_faces_left = style == "pixel"
+        return (target_x > source_x) if source_faces_left else (target_x < source_x)
 
     def restore_position(self, state: dict[str, object]) -> None:
         max_x = max(0, self.root.winfo_screenwidth() - PET_SIZE)
