@@ -5,6 +5,7 @@ import math
 import random
 import threading
 import time
+import traceback
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -649,10 +650,14 @@ class QiheiPet:
 
 
 if __name__ == "__main__":
-    required = list(STYLES.values()) + [
-        path for style in ANIMATION_SHEETS.values() for path, _count in style.values()
-    ]
-    missing = [str(path) for path in required if not path.exists()]
-    if missing:
-        raise SystemExit("Missing pet assets: " + ", ".join(missing))
-    QiheiPet().run()
+    try:
+        required = list(STYLES.values()) + [
+            path for style in ANIMATION_SHEETS.values() for path, _count in style.values()
+        ]
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise FileNotFoundError("Missing pet assets: " + ", ".join(missing))
+        QiheiPet().run()
+    except Exception:
+        (BASE_DIR / "launcher.log").write_text(traceback.format_exc(), encoding="utf-8")
+        raise

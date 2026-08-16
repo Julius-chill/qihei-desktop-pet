@@ -13,7 +13,7 @@ if not defined PYTHONW (
 )
 
 echo Starting with %PYTHONW%>"%~dp0launcher.log"
-start "" /b "%PYTHONW%" "%~dp0pet.py" 1>>"%~dp0launcher.log" 2>&1
+start "" /b "%PYTHONW%" "%~dp0pet.py"
 if errorlevel 1 (
     echo Launch failed. See launcher.log.
     pause
