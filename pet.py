@@ -165,20 +165,32 @@ class QiheiPet:
 
     def load_sheet(self, path: Path, count: int, airborne: bool) -> list[Image.Image]:
         sheet = Image.open(path).convert("RGBA")
-        cropped: list[Image.Image] = []
+        cells: list[Image.Image] = []
         for index in range(count):
             left = round(index * sheet.width / count)
             right = round((index + 1) * sheet.width / count)
             cell = sheet.crop((left, 0, right, sheet.height))
-            bounds = cell.getchannel("A").getbbox()
-            cropped.append(cell.crop(bounds) if bounds else cell)
+            cells.append(self.clean_specks(cell))
 
-        max_width = max(frame.width for frame in cropped)
-        max_height = max(frame.height for frame in cropped)
-        scale = min(IMAGE_SIZE / max_width, IMAGE_SIZE / max_height)
+        # Never crop and centre frames independently: changing silhouettes would
+        # move their visual centre and make the entire pet jitter. A shared union
+        # box preserves the coordinates authored inside every sprite-sheet cell.
+        bounds = [cell.getchannel("A").getbbox() for cell in cells]
+        visible = [box for box in bounds if box]
+        if visible:
+            shared_box = (
+                min(box[0] for box in visible), min(box[1] for box in visible),
+                max(box[2] for box in visible), max(box[3] for box in visible),
+            )
+            cropped = [cell.crop(shared_box) for cell in cells]
+        else:
+            cropped = cells
+
+        source_width, source_height = cropped[0].size
+        scale = min(IMAGE_SIZE / source_width, IMAGE_SIZE / source_height)
         frames: list[Image.Image] = []
         for image in cropped:
-            size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+            size = (max(1, round(source_width * scale)), max(1, round(source_height * scale)))
             resample = Image.Resampling.NEAREST if self.style.get() == "pixel" else Image.Resampling.LANCZOS
             image = image.resize(size, resample)
             frame = Image.new("RGBA", (PET_SIZE, PET_SIZE))
