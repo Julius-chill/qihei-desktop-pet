@@ -172,6 +172,9 @@ class QiheiPet:
             cell = sheet.crop((left, 0, right, sheet.height))
             cells.append(self.clean_specks(cell))
 
+        if not airborne:
+            cells = self.align_grounded_cells(cells)
+
         # Never crop and centre frames independently: changing silhouettes would
         # move their visual centre and make the entire pet jitter. A shared union
         # box preserves the coordinates authored inside every sprite-sheet cell.
@@ -199,6 +202,40 @@ class QiheiPet:
             frame.alpha_composite(image, (x, y))
             frames.append(self.clean_specks(frame))
         return frames
+
+    @staticmethod
+    def align_grounded_cells(cells: list[Image.Image]) -> list[Image.Image]:
+        """Register standing frames by the centre and baseline of their feet."""
+        anchors: list[tuple[float, int]] = []
+        for cell in cells:
+            alpha = cell.getchannel("A")
+            box = alpha.getbbox()
+            if not box:
+                anchors.append((cell.width / 2, cell.height))
+                continue
+            # The lowest 6% of the visible character contains the contact claws,
+            # while excluding nearly all tail/body silhouette changes.
+            band_top = max(box[1], box[3] - max(6, round((box[3] - box[1]) * 0.06)))
+            points = [
+                (x, y) for y in range(band_top, box[3]) for x in range(box[0], box[2])
+                if alpha.getpixel((x, y)) >= 40
+            ]
+            if points:
+                anchors.append((sum(x for x, _y in points) / len(points), max(y for _x, y in points)))
+            else:
+                anchors.append(((box[0] + box[2]) / 2, box[3] - 1))
+
+        target_x = sorted(anchor[0] for anchor in anchors)[len(anchors) // 2]
+        target_y = max(anchor[1] for anchor in anchors)
+        padding = 24
+        aligned: list[Image.Image] = []
+        for cell, (anchor_x, anchor_y) in zip(cells, anchors):
+            canvas = Image.new("RGBA", (cell.width + padding * 2, cell.height + padding * 2))
+            dx = padding + round(target_x - anchor_x)
+            dy = padding + target_y - anchor_y
+            canvas.alpha_composite(cell, (dx, dy))
+            aligned.append(canvas)
+        return aligned
 
     @staticmethod
     def make_touch_frames(idle: list[Image.Image]) -> list[Image.Image]:
