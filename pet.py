@@ -306,9 +306,10 @@ class QiheiPet:
             tx, ty = random.randint(15, max_x), random.randint(15, max_y)
         if abs(tx - sx) < 260:
             tx = 15 if sx > max_x / 2 else max_x
-        new_facing_left = tx < sx
-        if new_facing_left != self.facing_left:
-            self.facing_left = new_facing_left
+        # Source sheets face left. Mirror only when travelling to the right.
+        should_mirror = tx > sx
+        if should_mirror != self.facing_left:
+            self.facing_left = should_mirror
             self.last_render = None
         self.flight = {
             "start": time.perf_counter(), "duration": random.uniform(2.4, 3.8),
