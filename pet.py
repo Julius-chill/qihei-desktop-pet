@@ -76,7 +76,7 @@ class QiheiPet:
         self.sleeping = False
         progress_data = state.get("companion", {})
         if not progress_data:
-            progress_data = {"affection": state.get("affection", 20), "energy": state.get("energy", 82)}
+            progress_data = {"affection": state.get("affection", 80), "energy": state.get("energy", 82)}
         self.progress = CompanionProgress.from_dict(progress_data)
         self.last_vitals_update = time.time()
         self.drag_origin: tuple[int, int] | None = None

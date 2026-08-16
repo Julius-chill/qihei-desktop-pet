@@ -82,7 +82,7 @@ STORY_SUMMARY = "\n".join(f"- {item['title']}: {item['answer']}" for item in LOR
 class CompanionProgress:
     """Persistent bond and D&D scouting progression for Qihei."""
 
-    bond: int = 20
+    bond: int = 80
     experience: int = 0
     energy: float = 82.0
     morale: int = 10
@@ -105,7 +105,7 @@ class CompanionProgress:
     def from_dict(cls, data: Any) -> "CompanionProgress":
         data = data if isinstance(data, dict) else {}
         return cls(
-            bond=max(0, min(100, int(data.get("bond", data.get("affection", 20))))),
+            bond=max(0, min(100, int(data.get("bond", data.get("affection", 80))))),
             experience=max(0, int(data.get("experience", 0))),
             energy=max(0.0, min(100.0, float(data.get("energy", 82)))),
             morale=max(-100, min(100, int(data.get("morale", 10)))),
