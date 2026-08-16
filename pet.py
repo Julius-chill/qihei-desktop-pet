@@ -316,12 +316,13 @@ class QiheiPet:
         }
 
     def restore_position(self, state: dict[str, object]) -> None:
+        max_x = max(0, self.root.winfo_screenwidth() - PET_SIZE)
+        max_y = max(0, self.root.winfo_screenheight() - PET_SIZE - 35)
         try:
             x, y = int(state["x"]), int(state["y"])
         except (ValueError, KeyError, TypeError):
-            x = self.root.winfo_screenwidth() - PET_SIZE - 25
-            y = self.root.winfo_screenheight() - PET_SIZE - 60
-        self.root.geometry(f"{PET_SIZE}x{PET_SIZE}+{max(0, x)}+{max(0, y)}")
+            x, y = max_x - 25, max_y - 25
+        self.root.geometry(f"{PET_SIZE}x{PET_SIZE}+{min(max(0, x), max_x)}+{min(max(0, y), max_y)}")
 
     def save_state(self) -> None:
         data = {"x": self.root.winfo_x(), "y": self.root.winfo_y(), "style": self.style.get(),
