@@ -18,15 +18,15 @@ BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
 TRANSPARENT = "#010203"
 PET_SIZE = 112
-IMAGE_SIZE = 104
+IMAGE_SIZE = 94
 STYLES = {
     "pixel": BASE_DIR / "assets" / "raven_pixel_concept_v1.png",
     "realistic": BASE_DIR / "assets" / "raven_2d_concept_v4.png",
 }
 ANIMATION_SHEETS = {
     "pixel": {
-        "idle": (BASE_DIR / "assets" / "raven_pixel_idle_sheet.png", 4),
-        "flight": (BASE_DIR / "assets" / "raven_pixel_flight_sheet.png", 6),
+        "idle": (BASE_DIR / "assets" / "raven_pixel_idle_sheet_v2.png", 6),
+        "flight": (BASE_DIR / "assets" / "raven_pixel_flight_sheet_v2.png", 8),
     },
     "realistic": {
         "idle": (BASE_DIR / "assets" / "raven_realistic_idle_sheet.png", 4),
@@ -44,6 +44,8 @@ CLICK_LINES = [
     "嘎？有任务？", "别戳，羽毛会乱。", "空中密探不是按钮。",
     "说吧，跟踪谁？", "我一直看着。只是没汇报。",
 ]
+
+ACTION_FPS = {"idle": 3.0, "flight": 11.0, "takeoff": 9.0, "landing": 9.0, "touch": 8.0, "sleep": 1.2}
 
 
 class QiheiPet:
@@ -67,6 +69,11 @@ class QiheiPet:
         self.started = time.perf_counter()
         self.facing_left = False
         self.flight: dict[str, float] | None = None
+        self.action: dict[str, float | str] | None = None
+        self.sleeping = False
+        self.affection = int(state.get("affection", 20))
+        self.energy = float(state.get("energy", 82))
+        self.last_vitals_update = time.time()
         self.drag_origin: tuple[int, int] | None = None
         self.dragged = False
         self.quiet = False
@@ -94,6 +101,10 @@ class QiheiPet:
         self.menu = tk.Menu(self.root, tearoff=False, font=("Microsoft YaHei UI", 9))
         self.menu.add_command(label="让漆黑说句话", command=lambda: self.say(random.choice(IDLE_LINES)))
         self.menu.add_command(label="出去飞一圈", command=self.start_flight)
+        self.menu.add_command(label="摸摸漆黑", command=self.pet_qihei)
+        self.menu.add_command(label="休息 / 醒来", command=self.toggle_sleep)
+        self.menu.add_command(label="状态", command=self.show_status)
+        self.menu.add_command(label="专注计时", command=self.open_focus_window)
         self.menu.add_command(label="向漆黑提问", command=self.open_question_window)
         self.menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
         self.menu.add_command(label="DND骰子", command=self.open_dice_window)
@@ -124,6 +135,7 @@ class QiheiPet:
         self.root.after(random.randint(9000, 15000), self.start_flight)
         self.schedule_chatter()
         self.root.after(5000, self.check_reminders)
+        self.root.after(60000, self.update_vitals)
 
     def load_state(self) -> dict[str, object]:
         try:
@@ -137,20 +149,24 @@ class QiheiPet:
             state: self.load_sheet(path, count, airborne=state == "flight")
             for state, (path, count) in ANIMATION_SHEETS[style].items()
         }
-        self.frames["flight"] = self.add_inbetweens(self.frames["flight"])
         idle, flight = self.frames["idle"][0], self.frames["flight"][0]
-        downstroke = self.frames["flight"][len(self.frames["flight"]) // 2]
-        self.frames["takeoff"] = [idle, Image.blend(idle, flight, .34), Image.blend(idle, flight, .68), flight]
-        self.frames["landing"] = [downstroke, Image.blend(downstroke, idle, .34), Image.blend(downstroke, idle, .68), idle]
+        flight_cycle = self.frames["flight"]
+        # VPet-inspired Start -> Loop -> End transitions. Reusing real frames keeps
+        # pixel edges clean; blending pixel art produced the old floating specks.
+        self.frames["takeoff"] = [idle, self.frames["idle"][1], flight_cycle[1], flight]
+        self.frames["landing"] = [flight_cycle[-2], flight_cycle[-1], self.frames["idle"][-1], idle]
+        self.frames["touch"] = self.make_touch_frames(self.frames["idle"])
+        self.frames["sleep"] = self.make_sleep_frames(idle)
         self.last_render = None
         self.render_image("idle", 0)
 
     def load_sheet(self, path: Path, count: int, airborne: bool) -> list[Image.Image]:
         sheet = Image.open(path).convert("RGBA")
-        cell_width = sheet.width // count
         cropped: list[Image.Image] = []
         for index in range(count):
-            cell = sheet.crop((index * cell_width, 0, (index + 1) * cell_width, sheet.height))
+            left = round(index * sheet.width / count)
+            right = round((index + 1) * sheet.width / count)
+            cell = sheet.crop((left, 0, right, sheet.height))
             bounds = cell.getchannel("A").getbbox()
             cropped.append(cell.crop(bounds) if bounds else cell)
 
@@ -160,7 +176,8 @@ class QiheiPet:
         frames: list[Image.Image] = []
         for image in cropped:
             size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
-            image = image.resize(size, Image.Resampling.LANCZOS)
+            resample = Image.Resampling.NEAREST if self.style.get() == "pixel" else Image.Resampling.LANCZOS
+            image = image.resize(size, resample)
             frame = Image.new("RGBA", (PET_SIZE, PET_SIZE))
             x = (PET_SIZE - image.width) // 2
             y = (PET_SIZE - image.height) // 2 if airborne else PET_SIZE - image.height - 3
@@ -169,12 +186,25 @@ class QiheiPet:
         return frames
 
     @staticmethod
-    def add_inbetweens(frames: list[Image.Image]) -> list[Image.Image]:
-        expanded: list[Image.Image] = []
-        for index, current in enumerate(frames):
-            following = frames[(index + 1) % len(frames)]
-            expanded.extend([current, Image.blend(current, following, .33), Image.blend(current, following, .66)])
-        return expanded
+    def make_touch_frames(idle: list[Image.Image]) -> list[Image.Image]:
+        base = idle[0]
+        frames = [base]
+        for offset in (2, 4, 2):
+            frame = Image.new("RGBA", base.size)
+            frame.alpha_composite(base, (0, offset))
+            frames.append(frame)
+        frames.append(base)
+        return frames
+
+    @staticmethod
+    def make_sleep_frames(idle: Image.Image) -> list[Image.Image]:
+        frames: list[Image.Image] = []
+        for squash in (0.88, 0.84, 0.88):
+            body = idle.resize((idle.width, round(idle.height * squash)), Image.Resampling.NEAREST)
+            frame = Image.new("RGBA", idle.size)
+            frame.alpha_composite(body, (0, idle.height - body.height))
+            frames.append(frame)
+        return frames
 
     @staticmethod
     def clean_specks(image: Image.Image, minimum_size: int = 4) -> Image.Image:
@@ -222,6 +252,8 @@ class QiheiPet:
 
     def tick(self) -> None:
         now = time.perf_counter()
+        if self.action and now >= float(self.action["until"]):
+            self.action = None
         flight_progress: float | None = None
         if self.flight and not self.animation_paused.get():
             elapsed = now - self.flight["start"]
@@ -240,6 +272,12 @@ class QiheiPet:
                 self.root.after(random.randint(24000, 45000), self.start_flight)
         if self.animation_paused.get():
             state, frame_index = "idle", 0
+        elif self.action:
+            state = str(self.action["name"])
+            frame_index = int((now - float(self.action["started"])) * ACTION_FPS[state]) % len(self.frames[state])
+        elif self.sleeping:
+            state = "sleep"
+            frame_index = int((now - self.started) * ACTION_FPS[state]) % len(self.frames[state])
         elif self.flight and flight_progress is not None and flight_progress < .12:
             state = "takeoff"
             frame_index = min(len(self.frames[state]) - 1, int(flight_progress / .12 * len(self.frames[state])))
@@ -248,7 +286,7 @@ class QiheiPet:
             frame_index = min(len(self.frames[state]) - 1, int((flight_progress - .84) / .16 * len(self.frames[state])))
         else:
             state = "flight" if self.flight else "idle"
-            fps = 15 if self.flight else 2.5
+            fps = ACTION_FPS[state]
             frame_index = int((now - self.started) * fps) % len(self.frames[state])
         self.render_image(state, frame_index)
         bob = math.sin((now - self.started) * 8) * 2 if self.flight else 0
@@ -256,7 +294,7 @@ class QiheiPet:
         self.root.after(33, self.tick)
 
     def start_flight(self) -> None:
-        if self.flight or self.drag_origin is not None or self.animation_paused.get():
+        if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
             return
         sx, sy = self.root.winfo_x(), self.root.winfo_y()
         max_x = max(15, self.root.winfo_screenwidth() - PET_SIZE - 15)
@@ -273,7 +311,7 @@ class QiheiPet:
             self.facing_left = new_facing_left
             self.last_render = None
         self.flight = {
-            "start": time.perf_counter(), "duration": random.uniform(2.0, 3.3),
+            "start": time.perf_counter(), "duration": random.uniform(2.4, 3.8),
             "sx": sx, "sy": sy, "tx": tx, "ty": ty, "arc": random.randint(55, 120),
         }
 
@@ -286,7 +324,8 @@ class QiheiPet:
         self.root.geometry(f"{PET_SIZE}x{PET_SIZE}+{max(0, x)}+{max(0, y)}")
 
     def save_state(self) -> None:
-        data = {"x": self.root.winfo_x(), "y": self.root.winfo_y(), "style": self.style.get()}
+        data = {"x": self.root.winfo_x(), "y": self.root.winfo_y(), "style": self.style.get(),
+                "affection": self.affection, "energy": round(self.energy, 1)}
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def say(self, text: str, duration: int = 4800) -> None:
@@ -475,6 +514,72 @@ class QiheiPet:
         tk.Button(buttons, text="完成/恢复", command=toggle_done, width=11).pack(side="left", padx=6)
         tk.Button(buttons, text="删除", command=delete, width=9).pack(side="left")
         refresh()
+
+    def pet_qihei(self) -> None:
+        if self.flight:
+            self.say("先等我落地。空中摸鸟属于危险驾驶。")
+            return
+        if self.sleeping:
+            self.say("……我知道是你。别把羽冠摸反了。", 4200)
+        else:
+            now = time.perf_counter()
+            self.action = {"name": "touch", "started": now, "until": now + 0.7}
+            self.affection = min(100, self.affection + 1)
+            self.say(random.choice([
+                "只准一下。……再一下也不是不行。",
+                "嘎。手法尚可，勉强记一分。",
+                "别碰眼睛。羽冠可以。",
+            ]), 3600)
+        self.save_state()
+
+    def toggle_sleep(self) -> None:
+        self.flight = None
+        self.action = None
+        self.sleeping = not self.sleeping
+        if self.sleeping:
+            self.say("进入低功耗监听。重要线索叫醒我。", 4300)
+        else:
+            self.energy = min(100, self.energy + 8)
+            self.started = time.perf_counter()
+            self.say("醒了。桌面在我睡着时有招供吗？", 4300)
+
+    def update_vitals(self) -> None:
+        now = time.time()
+        minutes = max(0.0, (now - self.last_vitals_update) / 60)
+        self.last_vitals_update = now
+        if self.sleeping:
+            self.energy = min(100, self.energy + minutes * 1.8)
+        else:
+            self.energy = max(0, self.energy - minutes * 0.12)
+        if self.energy < 18 and not self.sleeping and random.random() < 0.35:
+            self.say("情报员申请休整。我的眼睛还红，不代表精神很好。")
+        self.save_state()
+        self.root.after(60000, self.update_vitals)
+
+    def show_status(self) -> None:
+        mood = "信任你" if self.affection >= 70 else "逐渐熟悉" if self.affection >= 35 else "保持观察"
+        mode = "休息中" if self.sleeping else "巡查中"
+        self.say(f"状态：{mode}\n精力 {round(self.energy)} / 100 · 默契 {self.affection} / 100\n评价：{mood}", 6500)
+
+    def open_focus_window(self) -> None:
+        window = self.make_tool_window("漆黑的专注哨", "430x245")
+        tk.Label(window, text="专注多久？漆黑替你守住时间。", bg="#181b27", fg="#eee9dc",
+                 font=("Microsoft YaHei UI", 11)).pack(pady=(18, 10))
+        minutes = tk.IntVar(value=25)
+        scale = tk.Scale(window, from_=5, to=90, resolution=5, orient="horizontal", variable=minutes,
+                         bg="#181b27", fg="#eee9dc", troughcolor="#6e2632", highlightthickness=0,
+                         length=330)
+        scale.pack()
+        status = tk.Label(window, text="", bg="#181b27", fg="#d4a348", font=("Microsoft YaHei UI", 10))
+        status.pack(pady=8)
+
+        def start() -> None:
+            duration = minutes.get()
+            status.configure(text=f"计时 {duration} 分钟。开始，别切窗口。")
+            self.say(f"专注哨开始：{duration} 分钟。我盯着时间，你盯着任务。", 5200)
+            self.root.after(duration * 60 * 1000, lambda: self.say("专注时间到。停手，伸展，喝水。命令，不是建议。", 10000))
+
+        tk.Button(window, text="开始专注", command=start, width=14).pack(pady=6)
 
     def check_reminders(self) -> None:
         for item in self.memo_store.due():

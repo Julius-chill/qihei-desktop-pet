@@ -17,13 +17,16 @@ python -m pip install pillow
 - 按住左键拖动：移动漆黑，位置会自动保存。
 - 右键 → 切换外观：像素版和写实版即时切换。
 - 可暂停活动、暂停碎碎念、隐藏五分钟，或让漆黑在鼠标附近巡航。
+- 右键可摸摸漆黑、让它休息/醒来、查看精力与默契。
+- “专注计时”提供 5–90 分钟的桌面专注哨。
 
 ## 动画
 
-- 两套外观各有独立的待机与飞行动画图集。
-- 待机包含呼吸、眨眼和歪头。
-- 六张原始飞行姿态经程序补间扩展为十八帧。
-- 起飞和降落使用独立过渡状态，减少静态/飞行切换时的跳变。
+- 像素版 v2 使用六帧待机和八帧完整振翅循环；写实版仍可随时切换。
+- 像素素材按整数邻近采样缩放，保留硬边和小尺寸轮廓。
+- 动作采用 VPet 式“开始 → 循环 → 结束”思路；起飞、巡航和降落各自使用真实姿态帧。
+- 不再混合两张像素帧制造补间，避免飞行时出现半透明脏点。
+- 摸头和睡眠拥有独立的即时动作状态，之后可继续追加素材而不改交互逻辑。
 - 加载时自动清除透明边缘上的孤立像素点。
 
 ## 备忘录和提醒
@@ -66,4 +69,6 @@ setx OPENAI_API_KEY "你的API密钥"
 
 ## 设计参考
 
-功能设计参考了 [VPet](https://github.com/LorisYounger/VPet)、[Shimeji-ee](https://github.com/DalekCraft2/Shimeji-Desktop) 和 [Desktop Mate](https://store.steampowered.com/app/3301060/Desktop_Mate/) 的公开功能：随机行为、可配置动画、鼠标互动、提醒、状态保存以及低打扰桌面陪伴。漆黑没有加入饥饿值和强制投喂，以避免制造日常负担。
+功能设计参考了 [VPet](https://github.com/LorisYounger/VPet)、[Shimeji-ee](https://github.com/DalekCraft2/Shimeji-Desktop) 和 [Desktop Mate](https://store.steampowered.com/app/3301060/Desktop_Mate/) 的公开功能：随机行为、动作状态机、鼠标互动、专注计时、提醒、状态保存以及低打扰桌面陪伴。
+
+这次重点学习了 VPet 的 `GraphInfo` 动作分类、`Start/Loop/End` 动画阶段、逐帧播放和角色逻辑/资源分离。项目只借鉴公开架构和交互思路；没有复制 VPet 自带角色动画。漆黑仍不加入饥饿值和强制投喂，以免把陪伴变成每日任务。
