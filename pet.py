@@ -46,7 +46,7 @@ CLICK_LINES = [
     "说吧，跟踪谁？", "我一直看着。只是没汇报。",
 ]
 
-ACTION_FPS = {"idle": 3.0, "flight": 11.0, "takeoff": 9.0, "landing": 9.0, "touch": 8.0, "sleep": 1.2}
+ACTION_FPS = {"flight": 11.0, "takeoff": 9.0, "landing": 9.0, "touch": 8.0, "sleep": 1.2}
 
 
 class QiheiPet:
@@ -68,6 +68,8 @@ class QiheiPet:
         if self.style.get() not in STYLES:
             self.style.set("pixel")
         self.started = time.perf_counter()
+        self.idle_motion_started: float | None = None
+        self.next_idle_motion = self.started + random.uniform(8.0, 16.0)
         self.facing_left = False
         self.flight: dict[str, float] | None = None
         self.action: dict[str, float | str] | None = None
@@ -297,12 +299,34 @@ class QiheiPet:
             frame_index = min(len(self.frames[state]) - 1, int((flight_progress - .84) / .16 * len(self.frames[state])))
         else:
             state = "flight" if self.flight else "idle"
-            fps = ACTION_FPS[state]
-            frame_index = int((now - self.started) * fps) % len(self.frames[state])
+            if self.flight:
+                frame_index = int((now - self.started) * ACTION_FPS[state]) % len(self.frames[state])
+            else:
+                frame_index = self.idle_frame(now)
         self.render_image(state, frame_index)
         bob = math.sin((now - self.started) * 8) * 2 if self.flight else 0
         self.canvas.coords(self.image_item, PET_SIZE // 2, PET_SIZE // 2 + bob)
         self.root.after(33, self.tick)
+
+    def idle_frame(self, now: float) -> int:
+        """Mostly hold a calm pose, with occasional non-periodic idle gestures."""
+        frame_count = len(self.frames["idle"])
+        if self.idle_motion_started is None and now >= self.next_idle_motion:
+            self.idle_motion_started = now
+
+        if self.idle_motion_started is not None:
+            # Play the full sheet forward and gently return to neutral once.
+            sequence = list(range(frame_count)) + list(range(frame_count - 2, 0, -1)) + [0]
+            index = int((now - self.idle_motion_started) * 3.2)
+            if index < len(sequence):
+                return sequence[index]
+            self.idle_motion_started = None
+            self.next_idle_motion = now + random.uniform(10.0, 22.0)
+
+        # A five-second, heavily held breathing cycle. Frame zero occupies 80%
+        # of it so Qihei looks watchful instead of constantly fidgeting.
+        breath = (0, 0, 0, 0, min(1, frame_count - 1), min(1, frame_count - 1), 0, 0, 0, 0)
+        return breath[int((now - self.started) * 2) % len(breath)]
 
     def start_flight(self) -> None:
         if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
