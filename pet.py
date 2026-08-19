@@ -113,38 +113,52 @@ class QiheiPet:
         self.bubble_text_item: int | None = None
         self.draw_bubble(130)
 
-        self.menu = tk.Menu(
-            self.root, tearoff=False, font=("Microsoft YaHei UI", 9),
-            bg=UI["raven"], fg=UI["paper"], activebackground=UI["blood"],
-            activeforeground="#ffffff", selectcolor=UI["gold"], bd=0,
-        )
-        self.menu.add_command(label="出去飞一圈", command=lambda: self.start_flight(True))
-        self.menu.add_command(label="休息 / 醒来", command=self.toggle_sleep)
-        self.menu.add_command(label="状态", command=self.show_status)
-        self.menu.add_command(label="羁绊与养成", command=self.open_companion_window)
-        self.menu.add_command(label="DND侦察行动", command=self.open_scout_window)
-        self.menu.add_command(label="专注计时", command=self.open_focus_window)
-        self.menu.add_command(label="向漆黑提问", command=self.open_question_window)
-        self.menu.add_command(label="API 使用情况", command=self.open_api_usage_window)
-        self.menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
-        self.menu.add_command(label="打开 Geek", command=self.launch_geek)
-        self.menu.add_command(label="DND骰子", command=self.open_dice_window)
-        self.menu.add_command(label="冒险档案", command=self.open_story_window)
-        self.menu.add_separator()
-        style_menu = tk.Menu(
-            self.menu, tearoff=False, font=("Microsoft YaHei UI", 9),
-            bg=UI["raven"], fg=UI["paper"], activebackground=UI["blood"],
-            activeforeground="#ffffff", selectcolor=UI["gold"], bd=0,
-        )
+        menu_style = {
+            "tearoff": False, "font": ("Microsoft YaHei UI", 9),
+            "bg": UI["raven"], "fg": UI["paper"],
+            "activebackground": UI["blood"], "activeforeground": "#ffffff",
+            "selectcolor": UI["gold"], "bd": 0,
+        }
+        self.menu = tk.Menu(self.root, **menu_style)
+
+        pet_menu = tk.Menu(self.menu, **menu_style)
+        pet_menu.add_command(label="出去飞一圈", command=lambda: self.start_flight(True))
+        pet_menu.add_command(label="休息 / 醒来", command=self.toggle_sleep)
+        pet_menu.add_command(label="查看状态", command=self.show_status)
+        pet_menu.add_command(label="现在几点", command=self.tell_time)
+        self.menu.add_cascade(label="漆黑", menu=pet_menu)
+
+        work_menu = tk.Menu(self.menu, **menu_style)
+        work_menu.add_command(label="专注计时", command=self.open_focus_window)
+        work_menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
+        work_menu.add_separator()
+        work_menu.add_command(label="打开 Geek", command=self.launch_geek)
+        self.menu.add_cascade(label="工作", menu=work_menu)
+
+        adventure_menu = tk.Menu(self.menu, **menu_style)
+        adventure_menu.add_command(label="羁绊与养成", command=self.open_companion_window)
+        adventure_menu.add_command(label="侦察行动", command=self.open_scout_window)
+        adventure_menu.add_command(label="DND 骰子", command=self.open_dice_window)
+        adventure_menu.add_command(label="冒险档案", command=self.open_story_window)
+        self.menu.add_cascade(label="DND 冒险", menu=adventure_menu)
+
+        intelligence_menu = tk.Menu(self.menu, **menu_style)
+        intelligence_menu.add_command(label="向漆黑提问", command=self.open_question_window)
+        intelligence_menu.add_command(label="API 使用情况", command=self.open_api_usage_window)
+        self.menu.add_cascade(label="问答与 API", menu=intelligence_menu)
+
+        self.settings_menu = tk.Menu(self.menu, **menu_style)
+        style_menu = tk.Menu(self.settings_menu, **menu_style)
         style_menu.add_radiobutton(label="像素版", variable=self.style, value="pixel", command=self.switch_style)
         style_menu.add_radiobutton(label="写实版", variable=self.style, value="realistic", command=self.switch_style)
-        self.menu.add_cascade(label="切换外观", menu=style_menu)
-        self.menu.add_checkbutton(label="暂停活动", variable=self.animation_paused, command=self.toggle_animation)
-        self.menu.add_checkbutton(label="在鼠标附近巡航", variable=self.follow_cursor)
-        self.menu.add_command(label="隐藏5分钟", command=self.hide_temporarily)
-        self.menu.add_command(label="现在几点", command=self.tell_time)
-        self.quiet_menu_index = self.menu.index("end") + 1
-        self.menu.add_command(label="安静一会儿", command=self.toggle_quiet)
+        self.settings_menu.add_cascade(label="切换外观", menu=style_menu)
+        self.settings_menu.add_checkbutton(label="暂停活动", variable=self.animation_paused, command=self.toggle_animation)
+        self.settings_menu.add_checkbutton(label="在鼠标附近巡航", variable=self.follow_cursor)
+        self.quiet_menu_index = self.settings_menu.index("end") + 1
+        self.settings_menu.add_command(label="安静一会儿", command=self.toggle_quiet)
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="隐藏 5 分钟", command=self.hide_temporarily)
+        self.menu.add_cascade(label="设置", menu=self.settings_menu)
         self.menu.add_separator()
         self.menu.add_command(label="退出", command=self.close)
 
@@ -1118,7 +1132,9 @@ class QiheiPet:
 
     def toggle_quiet(self) -> None:
         self.quiet = not self.quiet
-        self.menu.entryconfigure(self.quiet_menu_index, label="恢复碎碎念" if self.quiet else "安静一会儿")
+        self.settings_menu.entryconfigure(
+            self.quiet_menu_index, label="恢复碎碎念" if self.quiet else "安静一会儿"
+        )
         self.say("收到。静默侦察。" if self.quiet else "情报频道恢复。")
 
     def toggle_animation(self) -> None:

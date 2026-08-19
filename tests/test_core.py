@@ -150,5 +150,15 @@ class ExternalToolTests(unittest.TestCase):
         pet.say.assert_not_called()
 
 
+class MenuBehaviorTests(unittest.TestCase):
+    def test_quiet_label_updates_inside_settings_menu(self):
+        pet = MagicMock()
+        pet.quiet = False
+        pet.quiet_menu_index = 3
+        QiheiPet.toggle_quiet(pet)
+        pet.settings_menu.entryconfigure.assert_called_once_with(3, label="恢复碎碎念")
+        pet.say.assert_called_once_with("收到。静默侦察。")
+
+
 if __name__ == "__main__":
     unittest.main()
