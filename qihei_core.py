@@ -77,6 +77,83 @@ LORE = [
 
 STORY_SUMMARY = "\n".join(f"- {item['title']}: {item['answer']}" for item in LORE)
 
+DEFAULT_ADVENTURE_ARCHIVE: dict[str, Any] = {
+    "campaign": "《鸦影》",
+    "chapter": "第三章《乌鸦遗产》",
+    "current_scene": "旧钟楼：通往上层的半卡死活板门",
+    "updated_at": "",
+    "source": "内置档案",
+    "confirmed_facts": [item["answer"] for item in LORE[:3]],
+    "active_clues": [
+        "十二个槽位只剩十一枚金属片；第十二声与“回到昨日”有关。",
+        "无声杖与旧剑杖盒高度匹配，但握柄下方存在结构差异，来源仍然存疑。",
+        "旧黑斗篷内衬藏有闭眼组织蜡封残片，以及纸条“昨日没有死者”。",
+        "斗篷右肩有清洗过的暗褐污迹，是否为血迹尚未确认。",
+        "钟楼上层活板门并未锁死；门板上方有物体压住或顶住。",
+    ],
+    "open_questions": [
+        "第十二枚金属片在哪里？",
+        "无声杖是改装后的原件，还是高度相似的替代品？",
+        "上一任乌鸦与闭眼组织究竟是什么关系？",
+        "“昨日没有死者”与“回到昨日”是否指向同一机制？",
+        "活板门上方压着什么，是否存在隐蔽装置？",
+    ],
+    "next_actions": [
+        "从缝隙探查活板门上方，或缓慢顶开并控制上方物体。",
+        "鉴定斗篷暗褐污迹。",
+        "追查无声杖握柄下方缺失结构与改装痕迹。",
+    ],
+    "recent_events": [],
+}
+
+
+class AdventureArchive:
+    """Reloadable campaign cache written by the Codex conversation sync."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {**DEFAULT_ADVENTURE_ARCHIVE, **data}
+        except (OSError, json.JSONDecodeError):
+            pass
+        return dict(DEFAULT_ADVENTURE_ARCHIVE)
+
+    def save(self, data: dict[str, Any]) -> None:
+        data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def append_event(self, text: str, category: str = "桌宠行动") -> None:
+        data = self.load()
+        events = list(data.get("recent_events", []))
+        events.append({"time": datetime.now().isoformat(timespec="minutes"), "category": category, "text": text})
+        data["recent_events"] = events[-20:]
+        self.save(data)
+
+    def render(self) -> str:
+        data = self.load()
+        sections = [
+            f"{data['campaign']}　{data['chapter']}",
+            f"\n当前场景\n{data['current_scene']}",
+        ]
+        for key, title in (
+            ("confirmed_facts", "已确认事实"), ("active_clues", "活跃线索"),
+            ("open_questions", "未解谜团"), ("next_actions", "建议下一步"),
+        ):
+            values = data.get(key, [])
+            if values:
+                sections.append("\n" + title + "\n" + "\n".join(f"• {value}" for value in values))
+        events = data.get("recent_events", [])
+        if events:
+            sections.append("\n近期联动记录\n" + "\n".join(
+                f"• [{event.get('time', '')}] {event.get('category', '')}：{event.get('text', '')}" for event in events[-8:]
+            ))
+        sections.append(f"\n最后同步：{data.get('updated_at') or '尚未同步'}　来源：{data.get('source', '未知')}")
+        return "\n".join(sections)
+
 
 @dataclass
 class CompanionProgress:

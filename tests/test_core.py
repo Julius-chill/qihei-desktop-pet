@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from qihei_core import CompanionProgress, MemoStore, answer_local, roll_dice
+from qihei_core import AdventureArchive, CompanionProgress, MemoStore, answer_local, roll_dice
 from pet import QiheiPet
 
 
@@ -43,6 +43,20 @@ class MemoTests(unittest.TestCase):
             store.add("检查旧钟楼")
             loaded = MemoStore(path)
             self.assertEqual(loaded.items[0]["text"], "检查旧钟楼")
+
+
+class AdventureArchiveTests(unittest.TestCase):
+    def test_reload_and_append_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "archive.json"
+            archive = AdventureArchive(path)
+            data = archive.load()
+            data["current_scene"] = "测试场景"
+            archive.save(data)
+            archive.append_event("发现一枚羽毛", "侦察")
+            rendered = archive.render()
+            self.assertIn("测试场景", rendered)
+            self.assertIn("发现一枚羽毛", rendered)
 
 
 class CompanionTests(unittest.TestCase):

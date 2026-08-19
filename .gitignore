@@ -3,6 +3,7 @@ __pycache__/
 pet_state.json
 notes.json
 launcher.log
+adventure_archive.json
 assets/models/
 assets/qihei*.png
 assets/raven_2d_concept_v2.png

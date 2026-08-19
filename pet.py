@@ -13,7 +13,7 @@ from tkinter import messagebox
 
 from PIL import Image, ImageOps, ImageTk
 
-from qihei_core import CompanionProgress, MemoStore, STORY_SUMMARY, ask_openai, roll_dice
+from qihei_core import AdventureArchive, CompanionProgress, MemoStore, ask_openai, roll_dice
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
@@ -96,6 +96,7 @@ class QiheiPet:
         self.last_render: tuple[str, int, bool] | None = None
         self.image_item = self.canvas.create_image(PET_SIZE // 2, PET_SIZE // 2)
         self.memo_store = MemoStore(BASE_DIR / "notes.json")
+        self.adventure_archive = AdventureArchive(BASE_DIR / "adventure_archive.json")
         self.chat_history: list[dict[str, str]] = []
 
         self.bubble = tk.Toplevel(self.root)
@@ -606,14 +607,41 @@ class QiheiPet:
     def open_story_window(self) -> None:
         self.progress.record("story")
         self.save_state()
-        window = self.make_tool_window("漆黑的冒险档案", "620x520")
+        window = self.make_tool_window("漆黑的冒险档案", "720x620")
+        status = tk.Label(
+            window, text="", bg=UI["raven"], fg=UI["muted"], anchor="w",
+            font=("Consolas", 8),
+        )
+        status.pack(fill="x", padx=16, pady=(5, 2))
         text = tk.Text(
-            window, bg="#202433", fg="#eee9dc", insertbackground="#eee9dc",
+            window, bg=UI["panel"], fg=UI["paper"], insertbackground=UI["gold"],
             wrap="word", font=("Microsoft YaHei UI", 10), padx=14, pady=12,
         )
-        text.pack(fill="both", expand=True, padx=10, pady=10)
-        text.insert("1.0", "《鸦影》战役档案\n\n" + STORY_SUMMARY)
-        text.configure(state="disabled")
+        text.pack(fill="both", expand=True, padx=16, pady=(4, 8))
+
+        def reload_archive() -> None:
+            data = self.adventure_archive.load()
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            text.insert("1.0", self.adventure_archive.render())
+            text.configure(state="disabled")
+            status.configure(text=f"LIVE ARCHIVE  //  {data.get('source', '本地')}  //  {data.get('updated_at') or '等待首次同步'}")
+
+        tk.Button(window, text="重新载入最新档案", command=reload_archive).pack(fill="x", padx=16, pady=(0, 14))
+        reload_archive()
+        last_mtime = self.adventure_archive.path.stat().st_mtime if self.adventure_archive.path.exists() else 0.0
+
+        def watch_archive() -> None:
+            nonlocal last_mtime
+            if not window.winfo_exists():
+                return
+            current_mtime = self.adventure_archive.path.stat().st_mtime if self.adventure_archive.path.exists() else 0.0
+            if current_mtime != last_mtime:
+                last_mtime = current_mtime
+                reload_archive()
+            window.after(3000, watch_archive)
+
+        window.after(3000, watch_archive)
 
     def open_question_window(self) -> None:
         window = self.make_tool_window("向漆黑提问", "570x430")
@@ -944,6 +972,9 @@ class QiheiPet:
                 "模糊迹象": "发现异常，但尚不足以下结论；这是一条待复查线索。",
                 "无功而返": "没有找到可靠痕迹。漆黑拒绝把猜测伪装成情报。",
             }[outcome["quality"]]
+            self.adventure_archive.append_event(
+                f"{name}：{outcome['text']} {narrative}", category="漆黑侦察",
+            )
             result.insert("end", f"目标：{name}\n{description}\n\n{outcome['text']}\n\n{narrative}")
             self.save_state()
             self.say(f"{name}：{outcome['quality']}。{narrative}", 7600)
