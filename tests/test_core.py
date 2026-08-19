@@ -1,10 +1,11 @@
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 from PIL import Image
 
-from qihei_core import AdventureArchive, CompanionProgress, MemoStore, answer_local, roll_dice
+from qihei_core import APIUsageStore, AdventureArchive, CompanionProgress, MemoStore, answer_local, ask_openai, roll_dice
 from pet import ANIMATION_SHEETS, QiheiPet
 
 
@@ -59,6 +60,47 @@ class AdventureArchiveTests(unittest.TestCase):
             rendered = archive.render()
             self.assertIn("测试场景", rendered)
             self.assertIn("发现一枚羽毛", rendered)
+
+
+class APIUsageTests(unittest.TestCase):
+    def test_records_calls_tokens_and_recent_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = APIUsageStore(Path(directory) / "api_usage.json")
+            store.record(
+                "success", "test-model", input_tokens=12,
+                output_tokens=7, total_tokens=19, latency_ms=245,
+            )
+            store.record("error", "test-model", latency_ms=300, error="TimeoutError")
+            data = store.snapshot()
+            self.assertEqual(data["api_calls"], 2)
+            self.assertEqual(data["successful_calls"], 1)
+            self.assertEqual(data["failed_calls"], 1)
+            self.assertEqual(data["total_tokens"], 19)
+            self.assertNotIn("question", data["recent"][0])
+
+    def test_local_answer_is_counted_without_api_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = APIUsageStore(Path(directory) / "api_usage.json")
+            with patch.dict("os.environ", {}, clear=True):
+                answer = ask_openai("第十二声是什么", usage_store=store)
+            self.assertIn("十二", answer)
+            self.assertEqual(store.snapshot()["local_fallbacks"], 1)
+
+    def test_response_usage_tokens_are_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = APIUsageStore(Path(directory) / "api_usage.json")
+            response_data = {
+                "model": "test-model",
+                "usage": {"input_tokens": 21, "output_tokens": 8, "total_tokens": 29},
+                "output": [{"content": [{"type": "output_text", "text": "收到。"}]}],
+            }
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = __import__("json").dumps(response_data).encode()
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key", "QIHEI_OPENAI_MODEL": "test-model"}, clear=True):
+                with patch("qihei_core.urllib.request.urlopen", return_value=response):
+                    answer = ask_openai("测试", usage_store=store)
+            self.assertEqual(answer, "收到。")
+            self.assertEqual(store.snapshot()["total_tokens"], 29)
 
 
 class CompanionTests(unittest.TestCase):

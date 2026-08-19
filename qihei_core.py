@@ -4,6 +4,8 @@ import json
 import os
 import random
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -76,6 +78,68 @@ LORE = [
 ]
 
 STORY_SUMMARY = "\n".join(f"- {item['title']}: {item['answer']}" for item in LORE)
+
+
+class APIUsageStore:
+    """Thread-safe local ledger for API calls made by this desktop pet only."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def empty() -> dict[str, Any]:
+        return {
+            "api_calls": 0, "successful_calls": 0, "failed_calls": 0,
+            "local_fallbacks": 0, "input_tokens": 0, "output_tokens": 0,
+            "total_tokens": 0, "last_request_at": None, "recent": [],
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                loaded = {}
+            data = self.empty()
+            if isinstance(loaded, dict):
+                data.update(loaded)
+            if not isinstance(data.get("recent"), list):
+                data["recent"] = []
+            return data
+
+    def record(
+        self, status: str, model: str, *, input_tokens: int = 0,
+        output_tokens: int = 0, total_tokens: int | None = None,
+        latency_ms: int = 0, error: str | None = None,
+    ) -> None:
+        with self._lock:
+            data = self.snapshot()
+            now = datetime.now().isoformat(timespec="seconds")
+            if status == "local":
+                data["local_fallbacks"] = int(data.get("local_fallbacks", 0)) + 1
+            else:
+                data["api_calls"] = int(data.get("api_calls", 0)) + 1
+                key = "successful_calls" if status == "success" else "failed_calls"
+                data[key] = int(data.get(key, 0)) + 1
+                data["input_tokens"] = int(data.get("input_tokens", 0)) + max(0, input_tokens)
+                data["output_tokens"] = int(data.get("output_tokens", 0)) + max(0, output_tokens)
+                counted_total = total_tokens if total_tokens is not None else input_tokens + output_tokens
+                data["total_tokens"] = int(data.get("total_tokens", 0)) + max(0, counted_total)
+                data["last_request_at"] = now
+            entry = {
+                "at": now, "status": status, "model": model,
+                "input_tokens": max(0, input_tokens),
+                "output_tokens": max(0, output_tokens),
+                "latency_ms": max(0, latency_ms),
+            }
+            if error:
+                entry["error"] = error
+            data["recent"] = ([entry] + list(data.get("recent", [])))[:30]
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
 
 DEFAULT_ADVENTURE_ARCHIVE: dict[str, Any] = {
     "campaign": "《鸦影》",
@@ -296,15 +360,21 @@ def answer_local(question: str) -> str:
     return "这条我在现有冒险档案里没找到可靠记录。可以把它当作待调查线索，但别让我现场编供词。嘎。"
 
 
-def ask_openai(question: str, history: list[dict[str, str]] | None = None) -> str:
+def ask_openai(
+    question: str, history: list[dict[str, str]] | None = None,
+    usage_store: APIUsageStore | None = None,
+) -> str:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    model = os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini")
     if not api_key:
+        if usage_store:
+            usage_store.record("local", model)
         return answer_local(question)
     conversation = "\n".join(
         f"{turn.get('role', 'user')}: {turn.get('content', '')}" for turn in (history or [])[-6:]
     )
     payload = {
-        "model": os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini"),
+        "model": model,
         "instructions": PERSONA + "\n以下是当前战役档案：\n" + STORY_SUMMARY,
         "input": (conversation + "\nuser: " + question).strip(),
         "max_output_tokens": 500,
@@ -315,9 +385,20 @@ def ask_openai(question: str, history: list[dict[str, str]] | None = None) -> st
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
+    started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             data = json.loads(response.read().decode("utf-8"))
+        usage = data.get("usage", {}) if isinstance(data, dict) else {}
+        if usage_store:
+            raw_total = usage.get("total_tokens")
+            usage_store.record(
+                "success", str(data.get("model") or model),
+                input_tokens=int(usage.get("input_tokens", 0) or 0),
+                output_tokens=int(usage.get("output_tokens", 0) or 0),
+                total_tokens=int(raw_total) if raw_total is not None else None,
+                latency_ms=round((time.perf_counter() - started) * 1000),
+            )
         parts = []
         for output in data.get("output", []):
             for content in output.get("content", []):
@@ -325,6 +406,12 @@ def ask_openai(question: str, history: list[dict[str, str]] | None = None) -> st
                     parts.append(content.get("text", ""))
         return "\n".join(parts).strip() or answer_local(question)
     except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError) as error:
+        if usage_store:
+            usage_store.record(
+                "error", model,
+                latency_ms=round((time.perf_counter() - started) * 1000),
+                error=type(error).__name__,
+            )
         return f"联网情报渠道暂时失联（{type(error).__name__}）。\n\n本地档案答复：{answer_local(question)}"
 
 

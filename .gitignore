@@ -4,6 +4,8 @@ pet_state.json
 notes.json
 launcher.log
 adventure_archive.json
+api_usage.json
+api_usage.json.tmp
 assets/models/
 assets/qihei*.png
 assets/raven_2d_concept_v2.png

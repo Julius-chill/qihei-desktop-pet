@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import threading
 import time
@@ -13,7 +14,7 @@ from tkinter import messagebox
 
 from PIL import Image, ImageOps, ImageTk
 
-from qihei_core import AdventureArchive, CompanionProgress, MemoStore, ask_openai, roll_dice
+from qihei_core import APIUsageStore, AdventureArchive, CompanionProgress, MemoStore, ask_openai, roll_dice
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
@@ -47,13 +48,8 @@ IDLE_LINES = [
     "我不是话多，这是持续情报播报。", "嘎——有人摸鱼。我不说是谁。",
     "我在想那只母乌鸦……我是说，在规划航线。", "桌面这么乱，线索很好藏。",
 ]
-CLICK_LINES = [
-    "嘎？有任务？", "别戳，羽毛会乱。", "空中密探不是按钮。",
-    "说吧，跟踪谁？", "我一直看着。只是没汇报。",
-]
-
 ACTION_FPS = {
-    "flight": 11.0, "takeoff": 9.0, "landing": 9.0, "touch": 8.0,
+    "flight": 11.0, "takeoff": 9.0, "landing": 9.0,
     "sleep": 1.35, "sleep_enter": 5.0, "sleep_exit": 5.0,
 }
 
@@ -101,6 +97,8 @@ class QiheiPet:
         self.image_item = self.canvas.create_image(PET_SIZE // 2, PET_SIZE // 2)
         self.memo_store = MemoStore(BASE_DIR / "notes.json")
         self.adventure_archive = AdventureArchive(BASE_DIR / "adventure_archive.json")
+        self.api_usage = APIUsageStore(BASE_DIR / "api_usage.json")
+        self.api_usage_baseline = self.api_usage.snapshot()
         self.chat_history: list[dict[str, str]] = []
 
         self.bubble = tk.Toplevel(self.root)
@@ -119,15 +117,14 @@ class QiheiPet:
             bg=UI["raven"], fg=UI["paper"], activebackground=UI["blood"],
             activeforeground="#ffffff", selectcolor=UI["gold"], bd=0,
         )
-        self.menu.add_command(label="让漆黑说句话", command=lambda: self.say(random.choice(IDLE_LINES)))
         self.menu.add_command(label="出去飞一圈", command=lambda: self.start_flight(True))
-        self.menu.add_command(label="摸摸漆黑", command=self.pet_qihei)
         self.menu.add_command(label="休息 / 醒来", command=self.toggle_sleep)
         self.menu.add_command(label="状态", command=self.show_status)
         self.menu.add_command(label="羁绊与养成", command=self.open_companion_window)
         self.menu.add_command(label="DND侦察行动", command=self.open_scout_window)
         self.menu.add_command(label="专注计时", command=self.open_focus_window)
         self.menu.add_command(label="向漆黑提问", command=self.open_question_window)
+        self.menu.add_command(label="API 使用情况", command=self.open_api_usage_window)
         self.menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
         self.menu.add_command(label="DND骰子", command=self.open_dice_window)
         self.menu.add_command(label="冒险档案", command=self.open_story_window)
@@ -197,7 +194,6 @@ class QiheiPet:
         # pixel edges clean; blending pixel art produced the old floating specks.
         self.frames["takeoff"] = [idle, self.frames["idle"][1], flight_cycle[1], flight]
         self.frames["landing"] = [flight_cycle[-2], flight_cycle[-1], self.frames["idle"][-1], idle]
-        self.frames["touch"] = self.make_touch_frames(self.frames["idle"])
         if "sleep" not in self.frames:
             self.frames["sleep"] = self.make_sleep_frames(idle)
         sleep_cycle = self.frames["sleep"]
@@ -282,17 +278,6 @@ class QiheiPet:
             canvas.alpha_composite(cell, (dx, dy))
             aligned.append(canvas)
         return aligned
-
-    @staticmethod
-    def make_touch_frames(idle: list[Image.Image]) -> list[Image.Image]:
-        base = idle[0]
-        frames = [base]
-        for offset in (2, 4, 2):
-            frame = Image.new("RGBA", base.size)
-            frame.alpha_composite(base, (0, offset))
-            frames.append(frame)
-        frames.append(base)
-        return frames
 
     @staticmethod
     def make_sleep_frames(idle: Image.Image) -> list[Image.Image]:
@@ -694,7 +679,7 @@ class QiheiPet:
             ask_button.configure(state="disabled")
 
             def worker() -> None:
-                answer = ask_openai(user_text, self.chat_history)
+                answer = ask_openai(user_text, self.chat_history, self.api_usage)
                 self.root.after(0, lambda: append_answer(user_text, answer))
 
             threading.Thread(target=worker, daemon=True).start()
@@ -702,6 +687,107 @@ class QiheiPet:
         ask_button.configure(command=ask)
         question.bind("<Return>", lambda _event: ask())
         question.focus_set()
+
+    def open_api_usage_window(self) -> None:
+        window = self.make_tool_window("API 使用情况", "680x545")
+        window.minsize(590, 500)
+
+        has_key = bool(os.getenv("OPENAI_API_KEY", "").strip())
+        model = os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini")
+        status_row = tk.Frame(window, bg=UI["raven"])
+        status_row.pack(fill="x", padx=18, pady=(8, 12))
+        tk.Label(
+            status_row, text="●  在线 API 已配置" if has_key else "○  当前使用本地档案",
+            bg=UI["raven"], fg="#72B887" if has_key else UI["muted"],
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            status_row, text=model, bg=UI["raven"], fg=UI["gold"],
+            font=("Consolas", 10, "bold"),
+        ).pack(side="right")
+
+        cards = tk.Frame(window, bg=UI["raven"])
+        cards.pack(fill="x", padx=18)
+        values: dict[str, tk.Label] = {}
+
+        def add_card(key: str, title: str) -> None:
+            card = tk.Frame(cards, bg=UI["panel"], padx=14, pady=10)
+            card.pack(side="left", fill="both", expand=True, padx=(0, 8) if key != "tokens" else 0)
+            tk.Label(
+                card, text=title, bg=UI["panel"], fg=UI["muted"],
+                font=("Microsoft YaHei UI", 8),
+            ).pack(anchor="w")
+            values[key] = tk.Label(
+                card, text="0", bg=UI["panel"], fg=UI["paper"],
+                font=("Consolas", 18, "bold"),
+            )
+            values[key].pack(anchor="w", pady=(3, 0))
+
+        add_card("calls", "API 调用")
+        add_card("success", "成功 / 失败")
+        add_card("tokens", "累计 TOKEN")
+
+        detail = tk.Label(
+            window, text="", justify="left", anchor="w", bg=UI["raven"],
+            fg=UI["paper"], font=("Microsoft YaHei UI", 9),
+        )
+        detail.pack(fill="x", padx=18, pady=(14, 8))
+
+        tk.Label(
+            window, text="最近请求 // 不保存问题与回答正文", anchor="w",
+            bg=UI["raven"], fg=UI["gold"], font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(fill="x", padx=18, pady=(2, 5))
+        recent = tk.Text(
+            window, height=10, bg=UI["void"], fg=UI["paper"], wrap="none",
+            font=("Consolas", 9), padx=10, pady=8, state="disabled",
+        )
+        recent.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+        tk.Label(
+            window,
+            text="这里只统计漆黑自身产生的请求；账户账单与组织总用量请以 OpenAI 官方 Usage 页面为准。",
+            bg=UI["raven"], fg=UI["muted"], wraplength=630, justify="left",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x", padx=18, pady=(0, 12))
+
+        def refresh() -> None:
+            if not window.winfo_exists():
+                return
+            data = self.api_usage.snapshot()
+            baseline = self.api_usage_baseline
+            calls = int(data.get("api_calls", 0))
+            successes = int(data.get("successful_calls", 0))
+            failures = int(data.get("failed_calls", 0))
+            tokens = int(data.get("total_tokens", 0))
+            session_calls = calls - int(baseline.get("api_calls", 0))
+            session_tokens = tokens - int(baseline.get("total_tokens", 0))
+            values["calls"].configure(text=f"{calls:,}")
+            values["success"].configure(text=f"{successes:,} / {failures:,}")
+            values["tokens"].configure(text=f"{tokens:,}")
+            detail.configure(
+                text=(
+                    f"本次运行：{session_calls:,} 次调用 · {session_tokens:,} tokens\n"
+                    f"输入 {int(data.get('input_tokens', 0)):,} · 输出 {int(data.get('output_tokens', 0)):,} · "
+                    f"本地档案回答 {int(data.get('local_fallbacks', 0)):,}\n"
+                    f"上次在线请求：{data.get('last_request_at') or '尚无'}"
+                )
+            )
+            lines = []
+            status_names = {"success": "成功", "error": "失败", "local": "本地"}
+            for item in list(data.get("recent", []))[:12]:
+                token_text = f"{int(item.get('input_tokens', 0))}+{int(item.get('output_tokens', 0))} tok"
+                latency = f"{int(item.get('latency_ms', 0))} ms" if item.get("latency_ms") else "—"
+                error = f" · {item.get('error')}" if item.get("error") else ""
+                lines.append(
+                    f"{str(item.get('at', ''))[5:19]}  {status_names.get(item.get('status'), item.get('status')):<4}  "
+                    f"{token_text:>13}  {latency:>8}  {item.get('model', '')}{error}"
+                )
+            recent.configure(state="normal")
+            recent.delete("1.0", "end")
+            recent.insert("1.0", "\n".join(lines) if lines else "尚无 API 请求记录。")
+            recent.configure(state="disabled")
+            window.after(1500, refresh)
+
+        refresh()
 
     def open_dice_window(self) -> None:
         window = self.make_tool_window("漆黑的骰盅", "620x570")
@@ -856,25 +942,6 @@ class QiheiPet:
         tk.Button(buttons, text="完成/恢复", command=toggle_done, width=11).pack(side="left", padx=6)
         tk.Button(buttons, text="删除", command=delete, width=9).pack(side="left")
         refresh()
-
-    def pet_qihei(self) -> None:
-        if self.flight:
-            self.say("先等我落地。空中摸鸟属于危险驾驶。")
-            return
-        if self.sleeping:
-            self.say("……我知道是你。别把羽冠摸反了。", 4200)
-        else:
-            now = time.perf_counter()
-            self.action = {"name": "touch", "started": now, "until": now + 0.7}
-            unlock = self.progress.record("pet")
-            self.say(random.choice([
-                "只准一下。……再一下也不是不行。",
-                "嘎。手法尚可，勉强记一分。",
-                "别碰眼睛。羽冠可以。",
-            ]), 3600)
-            if unlock:
-                self.root.after(3700, lambda: self.say(unlock, 5000))
-        self.save_state()
 
     def toggle_sleep(self) -> None:
         self.flight = None
@@ -1087,8 +1154,6 @@ class QiheiPet:
             return
         if self.dragged:
             self.save_state()
-        else:
-            self.say(random.choice(CLICK_LINES))
         self.drag_origin = None
 
     def close(self) -> None:
