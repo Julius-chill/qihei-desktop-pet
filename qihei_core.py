@@ -251,7 +251,7 @@ def ask_openai(question: str, history: list[dict[str, str]] | None = None) -> st
         return f"联网情报渠道暂时失联（{type(error).__name__}）。\n\n本地档案答复：{answer_local(question)}"
 
 
-DICE_PATTERN = re.compile(r"^\s*(?:(\d{1,2})d)?(4|6|8|10|12|20|100)(?:\s*([+-])\s*(\d{1,3}))?\s*$", re.I)
+DICE_PATTERN = re.compile(r"^\s*(?:(\d{1,2})?d)?(4|6|8|10|12|20|100)(?:\s*([+-])\s*(\d{1,3}))?\s*$", re.I)
 
 
 def roll_dice(expression: str) -> dict[str, Any]:

@@ -20,6 +20,11 @@ STATE_FILE = BASE_DIR / "pet_state.json"
 TRANSPARENT = "#010203"
 PET_SIZE = 112
 IMAGE_SIZE = 94
+UI = {
+    "void": "#0C0F16", "raven": "#11131B", "panel": "#1B2030",
+    "panel_2": "#242A3B", "gold": "#C79A45", "gold_dim": "#745B31",
+    "blood": "#A83232", "paper": "#ECE8DC", "muted": "#9A9CAB",
+}
 STYLES = {
     "pixel": BASE_DIR / "assets" / "raven_pixel_concept_v1.png",
     "realistic": BASE_DIR / "assets" / "raven_2d_concept_v4.png",
@@ -104,7 +109,11 @@ class QiheiPet:
         self.bubble_text_item: int | None = None
         self.draw_bubble(130)
 
-        self.menu = tk.Menu(self.root, tearoff=False, font=("Microsoft YaHei UI", 9))
+        self.menu = tk.Menu(
+            self.root, tearoff=False, font=("Microsoft YaHei UI", 9),
+            bg=UI["raven"], fg=UI["paper"], activebackground=UI["blood"],
+            activeforeground="#ffffff", selectcolor=UI["gold"], bd=0,
+        )
         self.menu.add_command(label="让漆黑说句话", command=lambda: self.say(random.choice(IDLE_LINES)))
         self.menu.add_command(label="出去飞一圈", command=lambda: self.start_flight(True))
         self.menu.add_command(label="摸摸漆黑", command=self.pet_qihei)
@@ -118,7 +127,11 @@ class QiheiPet:
         self.menu.add_command(label="DND骰子", command=self.open_dice_window)
         self.menu.add_command(label="冒险档案", command=self.open_story_window)
         self.menu.add_separator()
-        style_menu = tk.Menu(self.menu, tearoff=False, font=("Microsoft YaHei UI", 9))
+        style_menu = tk.Menu(
+            self.menu, tearoff=False, font=("Microsoft YaHei UI", 9),
+            bg=UI["raven"], fg=UI["paper"], activebackground=UI["blood"],
+            activeforeground="#ffffff", selectcolor=UI["gold"], bd=0,
+        )
         style_menu.add_radiobutton(label="像素版", variable=self.style, value="pixel", command=self.switch_style)
         style_menu.add_radiobutton(label="写实版", variable=self.style, value="realistic", command=self.switch_style)
         self.menu.add_cascade(label="切换外观", menu=style_menu)
@@ -522,9 +535,73 @@ class QiheiPet:
         window = tk.Toplevel(self.root)
         window.title(title)
         window.geometry(geometry)
+        window.minsize(390, 230)
         window.attributes("-topmost", True)
-        window.configure(bg="#181b27")
+        window.configure(bg=UI["raven"])
+
+        dossier = tk.Frame(window, bg=UI["raven"])
+        dossier.pack(fill="x", padx=14, pady=(11, 0))
+        tk.Label(
+            dossier, text="RAVEN DOSSIER", bg=UI["raven"], fg=UI["gold"],
+            font=("Consolas", 8, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            dossier, text=title, bg=UI["raven"], fg=UI["paper"],
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(side="right")
+        rule = tk.Canvas(window, height=5, bg=UI["raven"], highlightthickness=0)
+        rule.pack(fill="x", padx=14, pady=(5, 2))
+        rule.create_line(0, 1, 1000, 1, fill=UI["gold_dim"], width=1)
+        rule.create_line(0, 3, 115, 3, fill=UI["blood"], width=2)
+        self.root.after_idle(lambda: self.style_tool_children(window) if window.winfo_exists() else None)
         return window
+
+    def style_tool_children(self, parent: tk.Misc) -> None:
+        """Apply one Raven Dossier visual system to legacy Tk tool widgets."""
+        primary_actions = {"投掷", "提问", "新增", "开始专注", "开始", "保存"}
+        for widget in parent.winfo_children():
+            if isinstance(widget, tk.Button):
+                primary = str(widget.cget("text")).split("\n", 1)[0] in primary_actions
+                widget.configure(
+                    relief="flat", bd=0, padx=10, pady=6, cursor="hand2",
+                    bg=UI["gold"] if primary else UI["panel_2"],
+                    fg=UI["void"] if primary else UI["paper"],
+                    activebackground=UI["blood"], activeforeground="#ffffff",
+                    font=("Microsoft YaHei UI", 9, "bold" if primary else "normal"),
+                )
+            elif isinstance(widget, tk.Entry):
+                widget.configure(
+                    relief="flat", bd=0, bg=UI["void"], fg=UI["paper"],
+                    insertbackground=UI["gold"], highlightthickness=1,
+                    highlightbackground="#343A4D", highlightcolor=UI["gold"],
+                )
+            elif isinstance(widget, tk.Text):
+                widget.configure(
+                    relief="flat", bd=0, bg=UI["panel"], fg=UI["paper"],
+                    insertbackground=UI["gold"], selectbackground=UI["blood"],
+                    highlightthickness=1, highlightbackground="#30364A",
+                )
+            elif isinstance(widget, tk.Listbox):
+                widget.configure(
+                    relief="flat", bd=0, bg=UI["panel"], fg=UI["paper"],
+                    selectbackground=UI["blood"], selectforeground="#ffffff",
+                    highlightthickness=1, highlightbackground="#30364A",
+                )
+            elif isinstance(widget, tk.Frame):
+                old_bg = str(widget.cget("bg")).lower()
+                widget.configure(bg=UI["panel"] if old_bg in {"#202433", "#202334"} else UI["raven"])
+            elif isinstance(widget, tk.Label):
+                old_bg = str(widget.cget("bg")).lower()
+                widget.configure(
+                    bg=UI["panel"] if old_bg in {"#202433", "#202334"} else UI["raven"],
+                    fg=UI["paper"] if str(widget.cget("fg")).lower() not in {"#d4a348", "#d5aa53"} else UI["gold"],
+                )
+            elif isinstance(widget, tk.Scale):
+                widget.configure(
+                    bg=UI["raven"], fg=UI["paper"], troughcolor=UI["void"],
+                    activebackground=UI["gold"], highlightthickness=0,
+                )
+            self.style_tool_children(widget)
 
     def open_story_window(self) -> None:
         self.progress.record("story")
@@ -588,22 +665,51 @@ class QiheiPet:
         question.focus_set()
 
     def open_dice_window(self) -> None:
-        window = self.make_tool_window("漆黑的骰盅", "500x420")
-        top = tk.Frame(window, bg="#181b27")
-        top.pack(fill="x", padx=10, pady=10)
-        expression = tk.Entry(top, font=("Consolas", 12), bg="#f5f2ea", fg="#22242c")
+        window = self.make_tool_window("漆黑的骰盅", "620x570")
+        window.minsize(540, 510)
+        tk.Label(
+            window, text="命运记录 // 输入骰式，或从常用骰中选择",
+            bg=UI["raven"], fg=UI["muted"], anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="x", padx=18, pady=(8, 5))
+
+        top = tk.Frame(window, bg=UI["raven"])
+        top.pack(fill="x", padx=18, pady=(0, 10))
+        expression = tk.Entry(top, font=("Consolas", 15), bg=UI["void"], fg=UI["paper"])
         expression.insert(0, "d20")
-        expression.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        expression.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 10))
+
+        result_card = tk.Frame(window, bg=UI["panel"], padx=16, pady=12)
+        result_card.pack(fill="x", padx=18)
+        result_number = tk.Label(
+            result_card, text="—", width=5, bg=UI["panel"], fg=UI["gold"],
+            font=("Consolas", 30, "bold"), anchor="center",
+        )
+        result_number.pack(side="left", padx=(0, 14))
         result_label = tk.Label(
-            window, text="输入骰式，例如 2d6+3", bg="#202433", fg="#eee9dc",
-            font=("Microsoft YaHei UI", 10), wraplength=450, justify="left", padx=12, pady=10,
+            result_card, text="等待投掷\n示例：d20、2d6+3、d100-10",
+            bg=UI["panel"], fg=UI["paper"], font=("Microsoft YaHei UI", 10),
+            wraplength=400, justify="left", anchor="w",
         )
-        result_label.pack(fill="x", padx=10)
+        result_label.pack(side="left", fill="x", expand=True)
+
+        quick = tk.Frame(window, bg=UI["raven"])
+        quick.pack(fill="x", padx=18, pady=10)
+        for column, sides in enumerate((4, 6, 8, 10, 12, 20, 100)):
+            quick.columnconfigure(column, weight=1)
+            tk.Button(quick, text=f"d{sides}", command=lambda s=sides: roll(f"d{s}"), width=5).grid(
+                row=0, column=column, sticky="ew", padx=(0 if column == 0 else 3, 0)
+            )
+
+        tk.Label(
+            window, text="ROLL LOG / 本次记录", bg=UI["raven"], fg=UI["gold"],
+            anchor="w", font=("Consolas", 8, "bold"),
+        ).pack(fill="x", padx=18, pady=(2, 4))
         history = tk.Listbox(
-            window, bg="#202433", fg="#eee9dc", selectbackground="#6e2632",
-            font=("Consolas", 10), height=9,
+            window, bg=UI["panel"], fg=UI["paper"], selectbackground=UI["blood"],
+            font=("Consolas", 10), height=7,
         )
-        history.pack(fill="both", expand=True, padx=10, pady=10)
+        history.pack(fill="both", expand=True, padx=18, pady=(0, 8))
 
         def roll(value: str | None = None) -> None:
             if value:
@@ -612,24 +718,24 @@ class QiheiPet:
             try:
                 outcome = roll_dice(expression.get())
             except ValueError as error:
-                result_label.configure(text=str(error))
+                result_number.configure(text="!")
+                result_label.configure(text=f"骰式无法识别\n{error}", fg="#E97870")
+                expression.focus_set()
                 return
             modifier = outcome["modifier"]
             detail = f"{outcome['rolls']}" + (f" {modifier:+d}" if modifier else "")
             line = f"{outcome['expression']} → {outcome['total']}  {detail}"
             history.insert(0, line)
-            result_label.configure(text=f"结果：{outcome['total']}\n{outcome['comment']}")
+            result_number.configure(text=str(outcome["total"]), fg=UI["gold"])
+            result_label.configure(text=f"{outcome['expression']}  //  {detail}\n{outcome['comment']}", fg=UI["paper"])
             self.say(f"{outcome['expression']}：{outcome['total']}。{outcome['comment']}", 5200)
 
-        tk.Button(top, text="投掷", width=8, command=roll).pack(side="right")
-        quick = tk.Frame(window, bg="#181b27")
-        quick.pack(fill="x", padx=10)
-        for sides in (4, 6, 8, 10, 12, 20, 100):
-            tk.Button(quick, text=f"d{sides}", command=lambda s=sides: roll(f"d{s}"), width=5).pack(side="left", padx=2)
+        tk.Button(top, text="投掷", width=9, command=roll).pack(side="right", fill="y")
 
         def roll_intel_advantage() -> None:
             if self.progress.intel_tokens <= 0:
-                result_label.configure(text="没有可用的情报优势。先让漆黑执行一次成功侦察。")
+                result_number.configure(text="0", fg="#E97870")
+                result_label.configure(text="没有可用的情报优势\n先让漆黑完成一次成功侦察。", fg="#E97870")
                 return
             first, second = roll_dice("d20"), roll_dice("d20")
             kept = max(first["total"], second["total"])
@@ -637,12 +743,16 @@ class QiheiPet:
             self.save_state()
             line = f"情报优势 d20 → {kept}  [{first['total']}, {second['total']}]"
             history.insert(0, line)
-            result_label.configure(text=f"情报优势：掷出 {first['total']} 与 {second['total']}，取 {kept}\n剩余 {self.progress.intel_tokens} 次")
+            result_number.configure(text=str(kept), fg=UI["gold"])
+            result_label.configure(text=f"情报优势 // {first['total']} 与 {second['total']}，取高\n剩余 {self.progress.intel_tokens} 次", fg=UI["paper"])
             self.say(f"情报优势：{first['total']}、{second['total']}，取 {kept}。我看见的路不会白看。", 6200)
 
-        tk.Button(window, text=f"使用情报优势（{self.progress.intel_tokens}）", command=roll_intel_advantage,
-                  bg="#6e2632", fg="white").pack(pady=(4, 10))
+        tk.Button(
+            window, text=f"使用情报优势  ·  剩余 {self.progress.intel_tokens}",
+            command=roll_intel_advantage, bg=UI["blood"], fg="#ffffff",
+        ).pack(fill="x", padx=18, pady=(0, 14))
         expression.bind("<Return>", lambda _event: roll())
+        expression.focus_set()
 
     def open_memo_window(self) -> None:
         window = self.make_tool_window("漆黑的备忘录", "620x450")

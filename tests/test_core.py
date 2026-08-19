@@ -7,6 +7,11 @@ from pet import QiheiPet
 
 
 class DiceTests(unittest.TestCase):
+    def test_standard_d20_shorthand(self):
+        result = roll_dice("d20")
+        self.assertEqual(len(result["rolls"]), 1)
+        self.assertEqual(result["expression"], "d20")
+
     def test_standard_expression(self):
         result = roll_dice("2d6+3")
         self.assertEqual(len(result["rolls"]), 2)
