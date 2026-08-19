@@ -2,8 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from qihei_core import AdventureArchive, CompanionProgress, MemoStore, answer_local, roll_dice
-from pet import QiheiPet
+from pet import ANIMATION_SHEETS, QiheiPet
 
 
 class DiceTests(unittest.TestCase):
@@ -79,6 +81,14 @@ class CompanionTests(unittest.TestCase):
 
 
 class AnimationDirectionTests(unittest.TestCase):
+    def test_pixel_sleep_sheet_has_six_transparent_cells(self):
+        path, frame_count = ANIMATION_SHEETS["pixel"]["sleep"]
+        with Image.open(path) as sheet:
+            self.assertEqual(frame_count, 6)
+            self.assertEqual(sheet.mode, "RGBA")
+            self.assertEqual(sheet.width % frame_count, 0)
+            self.assertEqual(sheet.getchannel("A").getextrema(), (0, 255))
+
     def test_pixel_sheet_faces_left(self):
         self.assertFalse(QiheiPet.should_mirror_for_flight("pixel", 500, 100))
         self.assertTrue(QiheiPet.should_mirror_for_flight("pixel", 100, 500))

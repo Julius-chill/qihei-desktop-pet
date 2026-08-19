@@ -33,6 +33,7 @@ ANIMATION_SHEETS = {
     "pixel": {
         "idle": (BASE_DIR / "assets" / "raven_pixel_idle_sheet_v2.png", 6),
         "flight": (BASE_DIR / "assets" / "raven_pixel_flight_sheet_v2.png", 8),
+        "sleep": (BASE_DIR / "assets" / "raven_pixel_sleep_sheet_v1.png", 6),
     },
     "realistic": {
         "idle": (BASE_DIR / "assets" / "raven_realistic_idle_sheet.png", 4),
@@ -51,7 +52,10 @@ CLICK_LINES = [
     "说吧，跟踪谁？", "我一直看着。只是没汇报。",
 ]
 
-ACTION_FPS = {"flight": 11.0, "takeoff": 9.0, "landing": 9.0, "touch": 8.0, "sleep": 1.2}
+ACTION_FPS = {
+    "flight": 11.0, "takeoff": 9.0, "landing": 9.0, "touch": 8.0,
+    "sleep": 1.35, "sleep_enter": 5.0, "sleep_exit": 5.0,
+}
 
 
 class QiheiPet:
@@ -194,7 +198,14 @@ class QiheiPet:
         self.frames["takeoff"] = [idle, self.frames["idle"][1], flight_cycle[1], flight]
         self.frames["landing"] = [flight_cycle[-2], flight_cycle[-1], self.frames["idle"][-1], idle]
         self.frames["touch"] = self.make_touch_frames(self.frames["idle"])
-        self.frames["sleep"] = self.make_sleep_frames(idle)
+        if "sleep" not in self.frames:
+            self.frames["sleep"] = self.make_sleep_frames(idle)
+        sleep_cycle = self.frames["sleep"]
+        settle = self.frames["idle"][min(3, len(self.frames["idle"]) - 1)]
+        # Short authored-pose transitions keep sleep from snapping straight from
+        # a tall standing silhouette into the low tucked pose.
+        self.frames["sleep_enter"] = [idle, settle, sleep_cycle[0], sleep_cycle[1]]
+        self.frames["sleep_exit"] = [sleep_cycle[1], sleep_cycle[0], settle, idle]
         self.last_render = None
         self.render_image("idle", 0)
 
@@ -869,12 +880,16 @@ class QiheiPet:
         self.flight = None
         self.action = None
         self.sleeping = not self.sleeping
+        now = time.perf_counter()
         if self.sleeping:
+            self.action = {"name": "sleep_enter", "started": now, "until": now + 0.8}
             self.say("进入低功耗监听。重要线索叫醒我。", 4300)
         else:
+            self.action = {"name": "sleep_exit", "started": now, "until": now + 0.8}
             self.energy = min(100, self.energy + 8)
-            self.started = time.perf_counter()
+            self.started = now
             self.say("醒了。桌面在我睡着时有招供吗？", 4300)
+        self.save_state()
 
     def update_vitals(self) -> None:
         now = time.time()
