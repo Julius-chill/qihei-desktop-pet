@@ -19,6 +19,7 @@ python -m pip install pillow
 - 可暂停活动、暂停碎碎念、隐藏五分钟，或让漆黑在鼠标附近巡航。
 - 右键可让漆黑休息/醒来、查看精力与默契。
 - “专注计时”提供 5–90 分钟的桌面专注哨。
+- “打开 Geek”会直接启动 `C:\Users\63045\Desktop\LST工作\geek\geek.exe`。
 
 ## 动画
 

@@ -140,5 +140,15 @@ class AnimationDirectionTests(unittest.TestCase):
         self.assertTrue(QiheiPet.should_mirror_for_flight("realistic", 500, 100))
 
 
+class ExternalToolTests(unittest.TestCase):
+    def test_geek_menu_action_starts_configured_executable(self):
+        pet = MagicMock()
+        with patch("pet.GEEK_EXE") as executable, patch("pet.os.startfile") as startfile:
+            executable.is_file.return_value = True
+            QiheiPet.launch_geek(pet)
+        startfile.assert_called_once_with(executable)
+        pet.say.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

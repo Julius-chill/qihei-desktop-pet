@@ -18,6 +18,7 @@ from qihei_core import APIUsageStore, AdventureArchive, CompanionProgress, MemoS
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
+GEEK_EXE = Path(r"C:\Users\63045\Desktop\LST工作\geek\geek.exe")
 TRANSPARENT = "#010203"
 PET_SIZE = 112
 IMAGE_SIZE = 94
@@ -126,6 +127,7 @@ class QiheiPet:
         self.menu.add_command(label="向漆黑提问", command=self.open_question_window)
         self.menu.add_command(label="API 使用情况", command=self.open_api_usage_window)
         self.menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
+        self.menu.add_command(label="打开 Geek", command=self.launch_geek)
         self.menu.add_command(label="DND骰子", command=self.open_dice_window)
         self.menu.add_command(label="冒险档案", command=self.open_story_window)
         self.menu.add_separator()
@@ -1135,6 +1137,15 @@ class QiheiPet:
 
     def tell_time(self) -> None:
         self.say(f"现在是 {datetime.now():%H:%M}。时间没有失踪，只是你没看它。")
+
+    def launch_geek(self) -> None:
+        if not GEEK_EXE.is_file():
+            self.say(f"Geek 的路径失效了：\n{GEEK_EXE}", 6500)
+            return
+        try:
+            os.startfile(GEEK_EXE)
+        except OSError as error:
+            self.say(f"Geek 启动失败：{type(error).__name__}", 5200)
 
     def show_menu(self, event: tk.Event) -> None:
         self.menu.tk_popup(event.x_root, event.y_root)
