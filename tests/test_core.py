@@ -141,13 +141,20 @@ class AnimationDirectionTests(unittest.TestCase):
 
 
 class ExternalToolTests(unittest.TestCase):
-    def test_geek_menu_action_starts_configured_executable(self):
+    def test_external_app_launcher_starts_configured_executable(self):
         pet = MagicMock()
-        with patch("pet.GEEK_EXE") as executable, patch("pet.os.startfile") as startfile:
-            executable.is_file.return_value = True
-            QiheiPet.launch_geek(pet)
+        executable = MagicMock()
+        executable.is_file.return_value = True
+        with patch("pet.os.startfile") as startfile:
+            QiheiPet.launch_external_app(pet, executable, "Everything")
         startfile.assert_called_once_with(executable)
         pet.say.assert_not_called()
+
+    def test_everything_menu_action_uses_portable_executable(self):
+        pet = MagicMock()
+        with patch("pet.EVERYTHING_EXE") as executable:
+            QiheiPet.launch_everything(pet)
+        pet.launch_external_app.assert_called_once_with(executable, "Everything")
 
 
 class MenuBehaviorTests(unittest.TestCase):

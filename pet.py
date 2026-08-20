@@ -19,6 +19,7 @@ from qihei_core import APIUsageStore, AdventureArchive, CompanionProgress, MemoS
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
 GEEK_EXE = Path(r"C:\Users\63045\Desktop\LST工作\geek\geek.exe")
+EVERYTHING_EXE = Path(r"C:\Users\63045\Desktop\LST工作\Everything-1.4.1.1030.x86\Everything.exe")
 TRANSPARENT = "#010203"
 PET_SIZE = 112
 IMAGE_SIZE = 94
@@ -133,6 +134,7 @@ class QiheiPet:
         work_menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
         work_menu.add_separator()
         work_menu.add_command(label="打开 Geek", command=self.launch_geek)
+        work_menu.add_command(label="打开 Everything", command=self.launch_everything)
         self.menu.add_cascade(label="工作", menu=work_menu)
 
         adventure_menu = tk.Menu(self.menu, **menu_style)
@@ -1155,13 +1157,19 @@ class QiheiPet:
         self.say(f"现在是 {datetime.now():%H:%M}。时间没有失踪，只是你没看它。")
 
     def launch_geek(self) -> None:
-        if not GEEK_EXE.is_file():
-            self.say(f"Geek 的路径失效了：\n{GEEK_EXE}", 6500)
+        self.launch_external_app(GEEK_EXE, "Geek")
+
+    def launch_everything(self) -> None:
+        self.launch_external_app(EVERYTHING_EXE, "Everything")
+
+    def launch_external_app(self, executable: Path, name: str) -> None:
+        if not executable.is_file():
+            self.say(f"{name} 的路径失效了：\n{executable}", 6500)
             return
         try:
-            os.startfile(GEEK_EXE)
+            os.startfile(executable)
         except OSError as error:
-            self.say(f"Geek 启动失败：{type(error).__name__}", 5200)
+            self.say(f"{name} 启动失败：{type(error).__name__}", 5200)
 
     def show_menu(self, event: tk.Event) -> None:
         self.menu.tk_popup(event.x_root, event.y_root)

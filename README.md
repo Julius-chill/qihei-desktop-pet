@@ -20,11 +20,12 @@ python -m pip install pillow
 - 右键可让漆黑休息/醒来、查看精力与默契。
 - “专注计时”提供 5–90 分钟的桌面专注哨。
 - “打开 Geek”会直接启动 `C:\Users\63045\Desktop\LST工作\geek\geek.exe`。
+- “打开 Everything”会启动现有便携版及其同目录配置：`C:\Users\63045\Desktop\LST工作\Everything-1.4.1.1030.x86\Everything.exe`。
 
 右键菜单按用途归为五组：
 
 - **漆黑**：飞行、休息、状态和报时。
-- **工作**：专注计时、备忘录与 Geek。
+- **工作**：专注计时、备忘录、Geek 与 Everything。
 - **DND 冒险**：羁绊养成、侦察、骰子和冒险档案。
 - **问答与 API**：向漆黑提问及 API 使用情况。
 - **设置**：外观、活动、鼠标巡航、碎碎念和临时隐藏。
