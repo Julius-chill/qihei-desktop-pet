@@ -102,6 +102,22 @@ class APIUsageTests(unittest.TestCase):
             self.assertEqual(answer, "收到。")
             self.assertEqual(store.snapshot()["total_tokens"], 29)
 
+    def test_api_error_object_falls_back_instead_of_breaking_chat(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"error":{"code":"bad_request"}}'
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with patch("qihei_core.urllib.request.urlopen", return_value=response):
+                answer = ask_openai("第十二声是什么")
+        self.assertIn("本地档案答复", answer)
+        self.assertIn("十二", answer)
+
+    def test_usage_ledger_failure_does_not_break_local_answer(self):
+        store = MagicMock()
+        store.record.side_effect = OSError("locked")
+        with patch.dict("os.environ", {}, clear=True):
+            answer = ask_openai("第十二声是什么", usage_store=store)
+        self.assertIn("十二", answer)
+
 
 class CompanionTests(unittest.TestCase):
     def test_progress_round_trip(self):

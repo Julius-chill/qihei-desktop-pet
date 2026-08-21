@@ -366,9 +366,18 @@ def ask_openai(
 ) -> str:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     model = os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini")
+
+    def record_usage(status: str, **details: Any) -> None:
+        if not usage_store:
+            return
+        try:
+            usage_store.record(status, model, **details)
+        except OSError:
+            # A locked/read-only usage ledger must never break the conversation.
+            pass
+
     if not api_key:
-        if usage_store:
-            usage_store.record("local", model)
+        record_usage("local")
         return answer_local(question)
     conversation = "\n".join(
         f"{turn.get('role', 'user')}: {turn.get('content', '')}" for turn in (history or [])[-6:]
@@ -389,11 +398,17 @@ def ask_openai(
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             data = json.loads(response.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError("API response was not an object")
+        if data.get("error"):
+            error_data = data["error"]
+            error_code = error_data.get("code", "api_error") if isinstance(error_data, dict) else "api_error"
+            raise ValueError(str(error_code))
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
         if usage_store:
             raw_total = usage.get("total_tokens")
-            usage_store.record(
-                "success", str(data.get("model") or model),
+            record_usage(
+                "success",
                 input_tokens=int(usage.get("input_tokens", 0) or 0),
                 output_tokens=int(usage.get("output_tokens", 0) or 0),
                 total_tokens=int(raw_total) if raw_total is not None else None,
@@ -405,13 +420,11 @@ def ask_openai(
                 if content.get("type") == "output_text":
                     parts.append(content.get("text", ""))
         return "\n".join(parts).strip() or answer_local(question)
-    except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError) as error:
-        if usage_store:
-            usage_store.record(
-                "error", model,
-                latency_ms=round((time.perf_counter() - started) * 1000),
-                error=type(error).__name__,
-            )
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        record_usage(
+            "error", latency_ms=round((time.perf_counter() - started) * 1000),
+            error=type(error).__name__,
+        )
         return f"联网情报渠道暂时失联（{type(error).__name__}）。\n\n本地档案答复：{answer_local(question)}"
 
 

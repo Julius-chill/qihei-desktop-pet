@@ -573,7 +573,7 @@ class QiheiPet:
 
     def style_tool_children(self, parent: tk.Misc) -> None:
         """Apply one Raven Dossier visual system to legacy Tk tool widgets."""
-        primary_actions = {"投掷", "提问", "新增", "开始专注", "开始", "保存"}
+        primary_actions = {"投掷", "提问", "发送", "新增", "开始专注", "开始", "保存"}
         for widget in parent.winfo_children():
             if isinstance(widget, tk.Button):
                 primary = str(widget.cget("text")).split("\n", 1)[0] in primary_actions
@@ -658,26 +658,68 @@ class QiheiPet:
         window.after(3000, watch_archive)
 
     def open_question_window(self) -> None:
-        window = self.make_tool_window("向漆黑提问", "570x430")
+        window = self.make_tool_window("向漆黑提问", "680x560")
+        window.minsize(520, 440)
+
+        tk.Label(
+            window, text="剧情、人物、线索，或者任何你想问的事。",
+            bg=UI["raven"], fg=UI["muted"], anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="x", padx=16, pady=(5, 7))
+
         transcript = tk.Text(
-            window, bg="#202433", fg="#eee9dc", insertbackground="#eee9dc",
-            wrap="word", font=("Microsoft YaHei UI", 10), padx=12, pady=10,
+            window, bg=UI["panel"], fg=UI["paper"], insertbackground=UI["paper"],
+            wrap="word", font=("Microsoft YaHei UI", 10), padx=14, pady=12,
+            relief="flat", bd=0, state="disabled", cursor="arrow",
         )
-        transcript.pack(fill="both", expand=True, padx=10, pady=(10, 5))
-        transcript.insert("end", "漆黑：问吧。剧情、人物、线索，或者别的。联网密钥存在时我会调用在线模型。\n\n")
-        row = tk.Frame(window, bg="#181b27")
-        row.pack(fill="x", padx=10, pady=(5, 10))
-        question = tk.Entry(row, font=("Microsoft YaHei UI", 10), bg="#f5f2ea", fg="#22242c")
-        question.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ask_button = tk.Button(row, text="提问", width=8)
-        ask_button.pack(side="right")
+        transcript.tag_configure("raven", foreground="#D7AE5A", spacing1=3, spacing3=7)
+        transcript.tag_configure("user", foreground="#B8C7E8", spacing1=3, spacing3=7)
+        transcript.tag_configure("system", foreground=UI["muted"], spacing3=5)
+
+        def append_transcript(label: str, text: str, tag: str) -> None:
+            transcript.configure(state="normal")
+            transcript.insert("end", f"{label}\n", tag)
+            transcript.insert("end", text.strip() + "\n\n")
+            transcript.configure(state="disabled")
+            transcript.see("end")
+
+        append_transcript(
+            "漆黑  //  情报频道已接通",
+            "问吧。没有配置在线密钥也能查本地冒险档案，不会让你对着一只哑鸟发呆。",
+            "raven",
+        )
+
+        input_panel = tk.Frame(window, bg=UI["raven"])
+        question = tk.Text(
+            input_panel, height=4, wrap="word", undo=True,
+            font=("Microsoft YaHei UI", 10), bg="#F1EEE5", fg="#22242C",
+            insertbackground="#A83232", relief="flat", bd=0, padx=10, pady=8,
+        )
+
+        controls = tk.Frame(input_panel, bg=UI["raven"], width=110)
+        controls.pack(side="right", fill="y")
+        controls.pack_propagate(False)
+        ask_button = tk.Button(controls, text="发送", width=10)
+        ask_button.pack(fill="x")
+        status = tk.Label(
+            controls, text="Enter 发送\nShift+Enter 换行", justify="left",
+            bg=UI["raven"], fg=UI["muted"], font=("Microsoft YaHei UI", 8),
+        )
+        status.pack(fill="x", pady=(9, 0))
+        question.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        input_panel.pack(side="bottom", fill="x", padx=16, pady=(0, 14))
+        transcript.pack(fill="both", expand=True, padx=16, pady=(0, 9))
+        request_state = {"busy": False}
 
         def append_answer(user_text: str, answer: str) -> None:
             if not window.winfo_exists():
                 return
-            transcript.insert("end", f"漆黑：{answer}\n\n")
-            transcript.see("end")
+            request_state["busy"] = False
+            append_transcript("漆黑", answer, "raven")
             ask_button.configure(state="normal")
+            question.configure(state="normal")
+            status.configure(text="Enter 发送\nShift+Enter 换行", fg=UI["muted"])
+            question.focus_set()
             self.chat_history.extend([
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": answer},
@@ -688,22 +730,44 @@ class QiheiPet:
                 self.say(unlock, 5200)
 
         def ask() -> None:
-            user_text = question.get().strip()
-            if not user_text:
+            if request_state["busy"]:
                 return
-            question.delete(0, "end")
-            transcript.insert("end", f"你：{user_text}\n")
-            transcript.see("end")
+            user_text = question.get("1.0", "end-1c").strip()
+            if not user_text:
+                status.configure(text="先写下问题，嘎。", fg="#D7AE5A")
+                question.focus_set()
+                return
+            request_state["busy"] = True
+            question.delete("1.0", "end")
+            append_transcript("你", user_text, "user")
             ask_button.configure(state="disabled")
+            question.configure(state="disabled")
+            status.configure(text="漆黑正在整理情报…", fg="#D7AE5A")
 
             def worker() -> None:
-                answer = ask_openai(user_text, self.chat_history, self.api_usage)
-                self.root.after(0, lambda: append_answer(user_text, answer))
+                try:
+                    answer = ask_openai(user_text, self.chat_history, self.api_usage)
+                except Exception as error:  # Keep the UI recoverable even if a local store fails.
+                    answer = f"情报通道出了点意外（{type(error).__name__}）。再问一次，我不会装死。"
+                try:
+                    self.root.after(0, lambda: append_answer(user_text, answer))
+                except tk.TclError:
+                    pass
 
             threading.Thread(target=worker, daemon=True).start()
 
         ask_button.configure(command=ask)
-        question.bind("<Return>", lambda _event: ask())
+        def submit_on_enter(_event: tk.Event) -> str:
+            ask()
+            return "break"
+
+        def newline_on_shift_enter(_event: tk.Event) -> str:
+            question.insert("insert", "\n")
+            return "break"
+
+        question.bind("<Return>", submit_on_enter)
+        question.bind("<Shift-Return>", newline_on_shift_enter)
+        question.bind("<Control-Return>", submit_on_enter)
         question.focus_set()
 
     def open_api_usage_window(self) -> None:
