@@ -1,5 +1,7 @@
+import io
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
@@ -7,7 +9,7 @@ from PIL import Image
 
 from qihei_core import (
     APIUsageStore, AdventureArchive, CompanionProgress, MemoStore,
-    answer_local, ask_openai, get_openai_api_key, roll_dice,
+    answer_local, ask_openai, explain_openai_http_error, get_openai_api_key, roll_dice,
 )
 from pet import ANIMATION_SHEETS, QiheiPet
 
@@ -89,6 +91,19 @@ class APIUsageTests(unittest.TestCase):
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-from-environment"}, clear=True):
             self.assertEqual(get_openai_api_key(), "test-key-from-environment")
 
+    def test_quota_error_has_actionable_explanation(self):
+        message, code = explain_openai_http_error(
+            429, {"error": {"type": "insufficient_quota", "code": "insufficient_quota"}},
+        )
+        self.assertEqual(code, "insufficient_quota")
+        self.assertIn("没有可用额度", message)
+        self.assertIn("Billing", message)
+
+    def test_invalid_key_error_has_actionable_explanation(self):
+        message, code = explain_openai_http_error(401, {"error": {"code": "invalid_api_key"}})
+        self.assertEqual(code, "invalid_api_key")
+        self.assertIn("更换密钥", message)
+
     def test_records_calls_tokens_and_recent_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             store = APIUsageStore(Path(directory) / "api_usage.json")
@@ -136,6 +151,17 @@ class APIUsageTests(unittest.TestCase):
                 answer = ask_openai("第十二声是什么")
         self.assertIn("本地档案答复", answer)
         self.assertIn("十二", answer)
+
+    def test_http_quota_error_is_decoded_for_chat(self):
+        body = b'{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}'
+        error = urllib.error.HTTPError(
+            "https://api.openai.com/v1/responses", 429, "Too Many Requests", {}, io.BytesIO(body),
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with patch("qihei_core.urllib.request.urlopen", side_effect=error):
+                answer = ask_openai("第十二声是什么")
+        self.assertIn("没有可用额度", answer)
+        self.assertIn("本地档案答复", answer)
 
     def test_usage_ledger_failure_does_not_break_local_answer(self):
         store = MagicMock()

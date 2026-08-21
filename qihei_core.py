@@ -398,6 +398,27 @@ def answer_local(question: str) -> str:
     return "这条我在现有冒险档案里没找到可靠记录。可以把它当作待调查线索，但别让我现场编供词。嘎。"
 
 
+def explain_openai_http_error(status: int, error_data: Any) -> tuple[str, str]:
+    """Return a user-facing explanation and a safe machine-readable error code."""
+    details = error_data.get("error", {}) if isinstance(error_data, dict) else {}
+    details = details if isinstance(details, dict) else {}
+    code = str(details.get("code") or details.get("type") or f"http_{status}")
+    if code == "insufficient_quota":
+        return (
+            "在线密钥已经接通，但这个 API 项目没有可用额度。请在 OpenAI Platform 的 Billing 页面启用计费或补充余额。",
+            code,
+        )
+    if code in {"invalid_api_key", "authentication_error"} or status == 401:
+        return ("这个 API 密钥无效、已撤销或不属于可用项目。请在“API 密钥设置”里更换密钥。", code)
+    if code in {"rate_limit_exceeded", "requests"} or status == 429:
+        return ("在线请求过于频繁或触发了项目速率限制。稍等片刻再问一次。", code)
+    if code in {"model_not_found", "permission_denied"} or status == 403:
+        return ("当前 API 项目无权使用设定的模型。请检查项目权限或更换可用模型。", code)
+    if status >= 500:
+        return ("OpenAI 服务暂时异常。稍后重试，我先查本地冒险档案。", code)
+    return (f"在线情报请求失败（HTTP {status}，{code}）。", code)
+
+
 def ask_openai(
     question: str, history: list[dict[str, str]] | None = None,
     usage_store: APIUsageStore | None = None,
@@ -458,6 +479,17 @@ def ask_openai(
                 if content.get("type") == "output_text":
                     parts.append(content.get("text", ""))
         return "\n".join(parts).strip() or answer_local(question)
+    except urllib.error.HTTPError as error:
+        try:
+            error_data = json.loads(error.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            error_data = {}
+        explanation, error_code = explain_openai_http_error(int(error.code), error_data)
+        record_usage(
+            "error", latency_ms=round((time.perf_counter() - started) * 1000),
+            error=error_code,
+        )
+        return f"{explanation}\n\n本地档案答复：{answer_local(question)}"
     except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         record_usage(
             "error", latency_ms=round((time.perf_counter() - started) * 1000),
