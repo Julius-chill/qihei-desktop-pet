@@ -197,6 +197,29 @@ class AdventureArchive:
         data["recent_events"] = events[-20:]
         self.save(data)
 
+    def task_hints(self) -> list[str]:
+        """Build chatter lines from the latest synchronized campaign state."""
+        data = self.load()
+        hints: list[str] = []
+        scene = str(data.get("current_scene", "")).strip()
+        if scene:
+            hints.append(f"当前现场：{scene}。先别急着跳场景，眼前的证据还没说完。")
+
+        templates = (
+            ("next_actions", "下一步建议：{} 嘎，别让线索在桌上落灰。"),
+            ("active_clues", "线索复盘：{} 这条值得继续盯。"),
+            ("open_questions", "还欠一份答案：{} 没证据以前，谁都别替真相招供。"),
+        )
+        for key, template in templates:
+            values = data.get(key, [])
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                text = str(value).strip()
+                if text:
+                    hints.append(template.format(text))
+        return hints
+
     def render(self) -> str:
         data = self.load()
         sections = [

@@ -1193,7 +1193,11 @@ class QiheiPet:
                 "烦躁": ["先说好，我心情不好时仍然专业，只是评论会更诚实。", "今天的风向和某些人的判断一样糟。"],
                 "冷静": IDLE_LINES,
             }
-            self.say(random.choice(mood_lines[self.progress.mood]))
+            task_hints = self.adventure_archive.task_hints()
+            # Most reports should move the live campaign forward; ordinary raven
+            # chatter keeps the pet from sounding like a quest log with wings.
+            lines = task_hints if task_hints and random.random() < 0.65 else mood_lines[self.progress.mood]
+            self.say(random.choice(lines), 7200 if lines is task_hints else 4800)
         self.schedule_chatter()
 
     def toggle_quiet(self) -> None:

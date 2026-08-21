@@ -61,6 +61,25 @@ class AdventureArchiveTests(unittest.TestCase):
             self.assertIn("测试场景", rendered)
             self.assertIn("发现一枚羽毛", rendered)
 
+    def test_task_hints_follow_latest_campaign_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "archive.json"
+            archive = AdventureArchive(path)
+            data = archive.load()
+            data.update({
+                "current_scene": "钟室木匣前",
+                "next_actions": ["检查黄铜钟锤的磨损"],
+                "active_clues": ["第十二声不在钟里"],
+                "open_questions": ["空槽里原本是什么？"],
+            })
+            archive.save(data)
+            hints = archive.task_hints()
+            joined = "\n".join(hints)
+            self.assertIn("钟室木匣前", joined)
+            self.assertIn("检查黄铜钟锤的磨损", joined)
+            self.assertIn("第十二声不在钟里", joined)
+            self.assertIn("空槽里原本是什么", joined)
+
 
 class APIUsageTests(unittest.TestCase):
     def test_records_calls_tokens_and_recent_metadata(self):
