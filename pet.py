@@ -4,17 +4,22 @@ import json
 import math
 import os
 import random
+import sys
 import threading
 import time
 import traceback
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
 
 from PIL import Image, ImageOps, ImageTk
 
-from qihei_core import APIUsageStore, AdventureArchive, CompanionProgress, MemoStore, ask_openai, roll_dice
+from qihei_core import (
+    APIUsageStore, AdventureArchive, CompanionProgress, MemoStore,
+    ask_openai, get_openai_api_key, roll_dice,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "pet_state.json"
@@ -147,6 +152,7 @@ class QiheiPet:
         intelligence_menu = tk.Menu(self.menu, **menu_style)
         intelligence_menu.add_command(label="向漆黑提问", command=self.open_question_window)
         intelligence_menu.add_command(label="API 使用情况", command=self.open_api_usage_window)
+        intelligence_menu.add_command(label="API 密钥设置", command=self.open_api_key_window)
         self.menu.add_cascade(label="问答与 API", menu=intelligence_menu)
 
         self.settings_menu = tk.Menu(self.menu, **menu_style)
@@ -573,7 +579,7 @@ class QiheiPet:
 
     def style_tool_children(self, parent: tk.Misc) -> None:
         """Apply one Raven Dossier visual system to legacy Tk tool widgets."""
-        primary_actions = {"投掷", "提问", "发送", "新增", "开始专注", "开始", "保存"}
+        primary_actions = {"投掷", "提问", "发送", "新增", "开始专注", "开始", "保存", "保存密钥"}
         for widget in parent.winfo_children():
             if isinstance(widget, tk.Button):
                 primary = str(widget.cget("text")).split("\n", 1)[0] in primary_actions
@@ -770,11 +776,122 @@ class QiheiPet:
         question.bind("<Control-Return>", submit_on_enter)
         question.focus_set()
 
+    def open_api_key_window(self) -> None:
+        window = self.make_tool_window("API 密钥设置", "610x390")
+        window.minsize(520, 360)
+        if getattr(self, "config_only", False):
+            window.protocol("WM_DELETE_WINDOW", self.close)
+
+        configured = bool(get_openai_api_key())
+        status = tk.Label(
+            window,
+            text="● 已配置，可以在线提问" if configured else "○ 尚未配置，目前只查询本地冒险档案",
+            bg=UI["raven"], fg="#72B887" if configured else UI["muted"],
+            anchor="w", font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        status.pack(fill="x", padx=18, pady=(10, 8))
+
+        tk.Label(
+            window,
+            text="在这里粘贴 OpenAI API Key。密钥保存到当前 Windows 用户环境，不会写入项目文件或 Git。",
+            bg=UI["raven"], fg=UI["paper"], justify="left", anchor="w",
+            wraplength=555, font=("Microsoft YaHei UI", 9),
+        ).pack(fill="x", padx=18, pady=(0, 10))
+
+        key_var = tk.StringVar()
+        key_entry = tk.Entry(window, textvariable=key_var, show="●", font=("Consolas", 10))
+        key_entry.pack(fill="x", padx=18, ipady=7)
+
+        show_key = tk.BooleanVar(value=False)
+
+        def toggle_key_visibility() -> None:
+            key_entry.configure(show="" if show_key.get() else "●")
+
+        tk.Checkbutton(
+            window, text="临时显示输入内容", variable=show_key,
+            command=toggle_key_visibility, bg=UI["raven"], fg=UI["paper"],
+            activebackground=UI["raven"], activeforeground=UI["paper"],
+            selectcolor=UI["panel"], font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="w", padx=18, pady=(7, 10))
+
+        feedback = tk.Label(
+            window, text="", bg=UI["raven"], fg=UI["muted"],
+            anchor="w", font=("Microsoft YaHei UI", 8),
+        )
+        feedback.pack(fill="x", padx=18, pady=(0, 8))
+
+        buttons = tk.Frame(window, bg=UI["raven"])
+        buttons.pack(fill="x", padx=18, pady=(0, 14))
+
+        def broadcast_environment_change() -> None:
+            try:
+                import ctypes
+
+                result = ctypes.c_ulong()
+                ctypes.windll.user32.SendMessageTimeoutW(
+                    0xFFFF, 0x001A, 0, "Environment", 0x0002, 1500,
+                    ctypes.byref(result),
+                )
+            except (AttributeError, OSError):
+                pass
+
+        def save_key() -> None:
+            value = key_var.get().strip()
+            if len(value) < 20 or any(character.isspace() for character in value):
+                feedback.configure(text="密钥格式看起来不完整，请重新复制。", fg="#D7AE5A")
+                key_entry.focus_set()
+                return
+            try:
+                import winreg
+
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, "Environment") as environment:
+                    winreg.SetValueEx(environment, "OPENAI_API_KEY", 0, winreg.REG_SZ, value)
+                os.environ["OPENAI_API_KEY"] = value
+                broadcast_environment_change()
+            except OSError as error:
+                feedback.configure(text=f"保存失败：{type(error).__name__}", fg="#D96A62")
+                return
+            key_var.set("")
+            status.configure(text="● 已配置，可以在线提问", fg="#72B887")
+            feedback.configure(text="保存成功。漆黑已经能读取密钥。", fg="#72B887")
+            if getattr(self, "config_only", False):
+                self.root.after(1200, self.close)
+
+        def clear_key() -> None:
+            if not messagebox.askyesno("清除 API 密钥", "确定清除当前 Windows 用户保存的密钥吗？", parent=window):
+                return
+            try:
+                import winreg
+
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE,
+                ) as environment:
+                    winreg.DeleteValue(environment, "OPENAI_API_KEY")
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                feedback.configure(text=f"清除失败：{type(error).__name__}", fg="#D96A62")
+                return
+            os.environ.pop("OPENAI_API_KEY", None)
+            broadcast_environment_change()
+            status.configure(text="○ 尚未配置，目前只查询本地冒险档案", fg=UI["muted"])
+            feedback.configure(text="密钥已清除。", fg=UI["muted"])
+
+        tk.Button(buttons, text="保存密钥", command=save_key).pack(side="left")
+        tk.Button(buttons, text="清除密钥", command=clear_key).pack(side="left", padx=(8, 0))
+        tk.Button(
+            buttons, text="打开 OpenAI 密钥页面",
+            command=lambda: webbrowser.open("https://platform.openai.com/api-keys"),
+        ).pack(side="right")
+
+        key_entry.bind("<Return>", lambda _event: save_key())
+        key_entry.focus_set()
+
     def open_api_usage_window(self) -> None:
         window = self.make_tool_window("API 使用情况", "680x545")
         window.minsize(590, 500)
 
-        has_key = bool(os.getenv("OPENAI_API_KEY", "").strip())
+        has_key = bool(get_openai_api_key())
         model = os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini")
         status_row = tk.Frame(window, bg=UI["raven"])
         status_row.pack(fill="x", padx=18, pady=(8, 12))
@@ -1275,7 +1392,12 @@ if __name__ == "__main__":
         missing = [str(path) for path in required if not path.exists()]
         if missing:
             raise FileNotFoundError("Missing pet assets: " + ", ".join(missing))
-        QiheiPet().run()
+        pet = QiheiPet()
+        pet.config_only = "--api-settings" in sys.argv
+        if pet.config_only:
+            pet.root.withdraw()
+            pet.root.after(100, pet.open_api_key_window)
+        pet.run()
     except Exception:
         (BASE_DIR / "launcher.log").write_text(traceback.format_exc(), encoding="utf-8")
         raise

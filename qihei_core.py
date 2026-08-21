@@ -80,6 +80,21 @@ LORE = [
 STORY_SUMMARY = "\n".join(f"- {item['title']}: {item['answer']}" for item in LORE)
 
 
+def get_openai_api_key() -> str:
+    """Read the API key from this process or the current Windows user profile."""
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    if key or os.name != "nt":
+        return key
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as environment:
+            value, _value_type = winreg.QueryValueEx(environment, "OPENAI_API_KEY")
+        return str(value).strip()
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
 class APIUsageStore:
     """Thread-safe local ledger for API calls made by this desktop pet only."""
 
@@ -387,7 +402,7 @@ def ask_openai(
     question: str, history: list[dict[str, str]] | None = None,
     usage_store: APIUsageStore | None = None,
 ) -> str:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = get_openai_api_key()
     model = os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini")
 
     def record_usage(status: str, **details: Any) -> None:

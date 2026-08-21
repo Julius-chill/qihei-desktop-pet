@@ -5,7 +5,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from qihei_core import APIUsageStore, AdventureArchive, CompanionProgress, MemoStore, answer_local, ask_openai, roll_dice
+from qihei_core import (
+    APIUsageStore, AdventureArchive, CompanionProgress, MemoStore,
+    answer_local, ask_openai, get_openai_api_key, roll_dice,
+)
 from pet import ANIMATION_SHEETS, QiheiPet
 
 
@@ -82,6 +85,10 @@ class AdventureArchiveTests(unittest.TestCase):
 
 
 class APIUsageTests(unittest.TestCase):
+    def test_api_key_reads_environment(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-from-environment"}, clear=True):
+            self.assertEqual(get_openai_api_key(), "test-key-from-environment")
+
     def test_records_calls_tokens_and_recent_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             store = APIUsageStore(Path(directory) / "api_usage.json")
