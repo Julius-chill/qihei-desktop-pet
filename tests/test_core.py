@@ -207,6 +207,16 @@ class AnimationDirectionTests(unittest.TestCase):
         self.assertFalse(QiheiPet.should_mirror_for_flight("realistic", 100, 500))
         self.assertTrue(QiheiPet.should_mirror_for_flight("realistic", 500, 100))
 
+    def test_grounded_bird_action_sheets_have_six_transparent_cells(self):
+        for style in ("pixel", "realistic"):
+            for action in ("look", "peck", "preen"):
+                path, frame_count = ANIMATION_SHEETS[style][action]
+                with self.subTest(style=style, action=action), Image.open(path) as sheet:
+                    self.assertEqual(frame_count, 6)
+                    self.assertEqual(sheet.mode, "RGBA")
+                    self.assertEqual(sheet.width % frame_count, 0)
+                    self.assertEqual(sheet.getchannel("A").getextrema()[0], 0)
+
 
 class ExternalToolTests(unittest.TestCase):
     def test_external_app_launcher_starts_configured_executable(self):

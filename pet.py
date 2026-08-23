@@ -42,10 +42,16 @@ ANIMATION_SHEETS = {
         "idle": (BASE_DIR / "assets" / "raven_pixel_idle_sheet_v2.png", 6),
         "flight": (BASE_DIR / "assets" / "raven_pixel_flight_sheet_v2.png", 8),
         "sleep": (BASE_DIR / "assets" / "raven_pixel_sleep_sheet_v1.png", 6),
+        "look": (BASE_DIR / "assets" / "raven_pixel_look_sheet_v1.png", 6),
+        "peck": (BASE_DIR / "assets" / "raven_pixel_peck_sheet_v1.png", 6),
+        "preen": (BASE_DIR / "assets" / "raven_pixel_preen_sheet_v1.png", 6),
     },
     "realistic": {
         "idle": (BASE_DIR / "assets" / "raven_realistic_idle_sheet.png", 4),
         "flight": (BASE_DIR / "assets" / "raven_realistic_flight_sheet.png", 6),
+        "look": (BASE_DIR / "assets" / "raven_realistic_look_sheet_v1.png", 6),
+        "peck": (BASE_DIR / "assets" / "raven_realistic_peck_sheet_v1.png", 6),
+        "preen": (BASE_DIR / "assets" / "raven_realistic_preen_sheet_v1.png", 6),
     },
 }
 
@@ -58,6 +64,7 @@ IDLE_LINES = [
 ACTION_FPS = {
     "flight": 11.0, "takeoff": 9.0, "landing": 9.0,
     "sleep": 1.35, "sleep_enter": 5.0, "sleep_exit": 5.0,
+    "look": 3.2, "peck": 5.4, "preen": 4.2,
 }
 
 
@@ -82,6 +89,7 @@ class QiheiPet:
         self.started = time.perf_counter()
         self.idle_motion_started: float | None = None
         self.next_idle_motion = self.started + random.uniform(8.0, 16.0)
+        self.next_bird_action = self.started + random.uniform(7.0, 15.0)
         self.facing_left = False
         self.flight: dict[str, float] | None = None
         self.action: dict[str, float | str] | None = None
@@ -389,6 +397,12 @@ class QiheiPet:
                 self.flight = None
                 self.save_state()
                 self.root.after(random.randint(24000, 45000), self.start_flight)
+        if (
+            not self.flight and not self.sleeping and not self.action
+            and self.drag_origin is None and not self.animation_paused.get()
+            and now >= self.next_bird_action
+        ):
+            self.start_bird_action(now)
         if self.animation_paused.get():
             state, frame_index = "idle", 0
         elif self.action:
@@ -437,6 +451,16 @@ class QiheiPet:
         # of it so Qihei looks watchful instead of constantly fidgeting.
         breath = (0, 0, 0, 0, min(1, frame_count - 1), min(1, frame_count - 1), 0, 0, 0, 0)
         return breath[int((now - self.started) * 2) % len(breath)]
+
+    def start_bird_action(self, now: float | None = None) -> None:
+        """Play one grounded bird gesture without moving the desktop window."""
+        if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
+            return
+        started = now if now is not None else time.perf_counter()
+        action_name = random.choices(("look", "peck", "preen"), weights=(5, 3, 2), k=1)[0]
+        duration = len(self.frames[action_name]) / ACTION_FPS[action_name]
+        self.action = {"name": action_name, "started": started, "until": started + duration}
+        self.next_bird_action = started + random.uniform(14.0, 32.0)
 
     def start_flight(self, reward: bool = False) -> None:
         if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
