@@ -2,14 +2,16 @@ import io
 import tempfile
 import unittest
 import urllib.error
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 from PIL import Image
 
 from qihei_core import (
-    APIUsageStore, AdventureArchive, CompanionProgress, MemoStore, RavenKeepsakeStore,
-    answer_local, ask_openai, explain_openai_http_error, get_openai_api_key, roll_dice,
+    APIUsageStore, AdventureArchive, CharacterSheet, CombatTrackerStore,
+    CompanionProgress, MemoStore, RavenKeepsakeStore, answer_local, ask_openai,
+    explain_openai_http_error, get_openai_api_key, parse_natural_reminder, roll_dice,
 )
 from pet import ANIMATION_SHEETS, QiheiPet
 
@@ -51,6 +53,31 @@ class MemoTests(unittest.TestCase):
             store.add("检查旧钟楼")
             loaded = MemoStore(path)
             self.assertEqual(loaded.items[0]["text"], "检查旧钟楼")
+
+    def test_natural_relative_reminder(self):
+        parsed = parse_natural_reminder(
+            "半小时后提醒我喝水", datetime(2026, 8, 26, 9, 0),
+        )
+        self.assertEqual(parsed["text"], "喝水")
+        self.assertEqual(parsed["remind_at"], "2026-08-26T09:30")
+
+    def test_natural_weekly_reminder(self):
+        parsed = parse_natural_reminder(
+            "每周五下午六点提醒我整理文件", datetime(2026, 8, 26, 9, 0),
+        )
+        self.assertEqual(parsed["text"], "整理文件")
+        self.assertEqual(parsed["repeat"], "weekly:4:18:00")
+        self.assertEqual(parsed["remind_at"], "2026-08-28T18:00")
+
+    def test_repeating_reminder_rolls_forward(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MemoStore(Path(directory) / "notes.json")
+            past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="minutes")
+            store.add("喝水", past, "daily:09:00")
+            due = store.due()
+            self.assertEqual(len(due), 1)
+            self.assertFalse(store.items[0]["notified"])
+            self.assertGreater(datetime.fromisoformat(store.items[0]["remind_at"]), datetime.now())
 
 
 class AdventureArchiveTests(unittest.TestCase):
@@ -219,6 +246,32 @@ class CompanionTests(unittest.TestCase):
     def test_tired_companion_cannot_scout(self):
         result = CompanionProgress(energy=5).scout()
         self.assertFalse(result["ok"])
+
+    def test_personality_distance_grows_with_bond(self):
+        distant = CompanionProgress(bond=20).personality_profile
+        close = CompanionProgress(bond=90).personality_profile
+        self.assertGreater(close["cursor_distance"], distant["cursor_distance"])
+        self.assertGreater(close["startle_patience"], distant["startle_patience"])
+
+
+class DndUtilityTests(unittest.TestCase):
+    def test_character_sheet_answers_locally(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sheet.json"
+            path.write_text('{"skills":{"stealth":7,"perception":6}}', encoding="utf-8")
+            sheet = CharacterSheet(path)
+            self.assertIn("+7", sheet.answer("我的隐匿是多少"))
+
+    def test_combat_tracker_sorts_and_advances_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CombatTrackerStore(Path(directory) / "combat.json")
+            store.add("Julius", 14, 20)
+            store.add("敌人", 18, 12)
+            self.assertEqual(store.data["combatants"][0]["name"], "敌人")
+            store.next_turn()
+            self.assertEqual(store.data["turn"], 1)
+            store.next_turn()
+            self.assertEqual(store.data["round"], 2)
 
 
 class AnimationDirectionTests(unittest.TestCase):

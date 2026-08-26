@@ -4,12 +4,13 @@ import json
 import os
 import random
 import re
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -353,6 +354,214 @@ class RavenKeepsakeStore:
         }
 
 
+CHINESE_NUMBERS = {
+    "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+
+def parse_number(text: str) -> int:
+    if text.isdigit():
+        return int(text)
+    if text in CHINESE_NUMBERS:
+        return CHINESE_NUMBERS[text]
+    if text.startswith("十"):
+        return 10 + CHINESE_NUMBERS.get(text[1:], 0)
+    if text.endswith("十"):
+        return CHINESE_NUMBERS.get(text[:-1], 1) * 10
+    if "十" in text:
+        tens, ones = text.split("十", 1)
+        return CHINESE_NUMBERS.get(tens, 1) * 10 + CHINESE_NUMBERS.get(ones, 0)
+    raise ValueError(f"无法识别数字：{text}")
+
+
+def parse_natural_reminder(command: str, now: datetime | None = None) -> dict[str, str]:
+    """Parse common Chinese reminder phrases into MemoStore fields."""
+    now = now or datetime.now()
+    raw = command.strip()
+    text = re.sub(r"^(请)?(漆黑)?(帮我)?(记得)?提醒我?", "", raw).strip(" ，,：:")
+    repeat = ""
+    target: datetime | None = None
+
+    relative = re.search(r"(半|\d+|[一二两三四五六七八九十]+)(分钟|小时|天)后", raw)
+    if relative:
+        value = 0.5 if relative.group(1) == "半" else parse_number(relative.group(1))
+        unit = relative.group(2)
+        delta = timedelta(minutes=value if unit == "分钟" else value * 60 if unit == "小时" else value * 1440)
+        target = now + delta
+        text = text.replace(relative.group(0), "").strip(" ，,：:")
+
+    weekday = re.search(r"每周([一二三四五六日天])", raw)
+    if weekday:
+        weekday_index = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}[weekday.group(1)]
+        repeat = f"weekly:{weekday_index}"
+        text = text.replace(weekday.group(0), "").strip(" ，,：:")
+
+    time_match = re.search(
+        r"(?:(上午|早上|明早|下午|晚上|中午)\s*)?"
+        r"(\d{1,2}|[一二两三四五六七八九十]+)\s*[点时](半|\d{1,2}\s*分?)?",
+        raw,
+    )
+    hour, minute = 9, 0
+    if time_match:
+        period = time_match.group(1) or ""
+        hour = parse_number(time_match.group(2))
+        minute_token = (time_match.group(3) or "").replace("分", "").strip()
+        minute = 30 if minute_token == "半" else int(minute_token or 0)
+        if period in {"下午", "晚上"} and hour < 12:
+            hour += 12
+        if period == "中午" and hour < 11:
+            hour += 12
+        text = text.replace(time_match.group(0), "").strip(" ，,：:")
+
+    if weekday:
+        days = (weekday_index - now.weekday()) % 7
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days)
+        if candidate <= now:
+            candidate += timedelta(days=7)
+        target = candidate
+        repeat += f":{hour:02d}:{minute:02d}"
+    elif target is None:
+        day_offset = 2 if "后天" in raw else 1 if any(word in raw for word in ("明天", "明早")) else 0
+        if time_match or day_offset:
+            target = (now + timedelta(days=day_offset)).replace(
+                hour=hour, minute=minute, second=0, microsecond=0,
+            )
+            if day_offset == 0 and target <= now:
+                target += timedelta(days=1)
+
+    for token in ("今天", "明天", "明早", "后天", "每天"):
+        text = text.replace(token, "")
+    text = re.sub(r"(请)?(漆黑)?(帮我)?(记得)?提醒我?", "", text)
+    if "每天" in raw:
+        repeat = f"daily:{hour:02d}:{minute:02d}"
+    text = re.sub(r"\s+", " ", text).strip(" ，,：:")
+    if not text:
+        raise ValueError("提醒内容不能为空")
+    if target is None:
+        raise ValueError("没有识别出提醒时间，例如“半小时后”或“明早九点”")
+    return {
+        "text": text,
+        "remind_at": target.isoformat(timespec="minutes"),
+        "repeat": repeat,
+    }
+
+
+class CharacterSheet:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def answer(self, question: str) -> str:
+        data = self.load()
+        stats = data.get("skills", {}) if isinstance(data.get("skills"), dict) else {}
+        aliases = {
+            "隐匿": "stealth", "潜行": "stealth", "察觉": "perception", "感知": "perception",
+            "调查": "investigation", "侦察": "scouting", "先攻": "initiative",
+        }
+        for label, key in aliases.items():
+            if label in question and key in stats:
+                value = int(stats[key])
+                return f"{label}加值是 {value:+d}。这是本地角色卡记录，不消耗API。"
+        if any(word in question for word in ("角色卡", "能力", "属性")):
+            rendered = "　".join(
+                f"{name} {int(stats[key]):+d}" for name, key in (
+                    ("隐匿", "stealth"), ("察觉", "perception"), ("调查", "investigation"),
+                    ("先攻", "initiative"),
+                ) if key in stats
+            )
+            return rendered or "本地角色卡还没有录入可靠数值。"
+        return ""
+
+
+class CombatTrackerStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.data = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {"round": max(1, int(data.get("round", 1))),
+                        "turn": max(0, int(data.get("turn", 0))),
+                        "combatants": list(data.get("combatants", []))}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+        return {"round": 1, "turn": 0, "combatants": []}
+
+    def save(self) -> None:
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def add(self, name: str, initiative: int, hp: int = 0, status: str = "") -> None:
+        if not name.strip():
+            raise ValueError("参战者名称不能为空")
+        self.data["combatants"].append({
+            "name": name.strip(), "initiative": int(initiative), "hp": max(0, int(hp)),
+            "status": status.strip(),
+        })
+        self.data["combatants"].sort(key=lambda item: (-int(item["initiative"]), item["name"]))
+        self.save()
+
+    def next_turn(self) -> None:
+        count = len(self.data["combatants"])
+        if not count:
+            return
+        self.data["turn"] = (int(self.data["turn"]) + 1) % count
+        if self.data["turn"] == 0:
+            self.data["round"] = int(self.data["round"]) + 1
+        self.save()
+
+    def adjust_hp(self, index: int, delta: int) -> None:
+        item = self.data["combatants"][index]
+        item["hp"] = max(0, int(item.get("hp", 0)) + int(delta))
+        self.save()
+
+    def set_status(self, index: int, status: str) -> None:
+        self.data["combatants"][index]["status"] = status.strip()
+        self.save()
+
+    def remove(self, index: int) -> None:
+        self.data["combatants"].pop(index)
+        count = len(self.data["combatants"])
+        self.data["turn"] = min(int(self.data["turn"]), max(0, count - 1))
+        self.save()
+
+    def reset(self) -> None:
+        self.data = {"round": 1, "turn": 0, "combatants": []}
+        self.save()
+
+
+def search_everything(
+    query: str,
+    wheel_path: Path,
+    max_results: int = 5,
+    instance: str | None = None,
+) -> list[dict[str, Any]]:
+    """Query the local Everything IPC index through the vendored pure-Python client."""
+    query = query.strip()
+    if not query:
+        return []
+    wheel = str(wheel_path)
+    if wheel not in sys.path:
+        sys.path.insert(0, wheel)
+    try:
+        from everyfile.sdk.api import EverythingAPI  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise RuntimeError("Everything IPC 客户端缺失") from error
+    api = EverythingAPI(instance=instance)
+    return list(api.search(
+        query, fields=["name", "path", "full_path", "is_file", "is_folder"],
+        max_results=max(1, min(50, int(max_results))),
+    ))
+
+
 @dataclass
 class CompanionProgress:
     """Persistent bond and D&D scouting progression for Qihei."""
@@ -433,6 +642,28 @@ class CompanionProgress:
     @property
     def ability(self) -> str:
         return self.ABILITIES[min(self.scout_level, len(self.ABILITIES)) - 1]
+
+    @property
+    def personality_profile(self) -> dict[str, Any]:
+        if self.bond >= 80:
+            return {
+                "stance": "并肩守望", "cursor_distance": 290, "startle_patience": 4,
+                "line": "我会靠近一点。不是依赖，只是这个位置视野更好。",
+            }
+        if self.bond >= 55:
+            return {
+                "stance": "默契观察", "cursor_distance": 255, "startle_patience": 3,
+                "line": "你负责决定方向，我负责指出哪里像陷阱。",
+            }
+        if self.bond >= 30:
+            return {
+                "stance": "保持戒备", "cursor_distance": 225, "startle_patience": 2,
+                "line": "合作可以。先让我看看你会不会踩中同一个机关两次。",
+            }
+        return {
+            "stance": "远距审视", "cursor_distance": 190, "startle_patience": 1,
+            "line": "先保持这个距离。信任不是默认选项。",
+        }
 
     def record(self, action: str) -> str:
         if action not in self.ACTIONS:
@@ -637,18 +868,24 @@ class MemoStore:
     def save(self) -> None:
         self.path.write_text(json.dumps(self.items, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def add(self, text: str, remind_at: str = "") -> None:
+    def add(self, text: str, remind_at: str = "", repeat: str = "") -> None:
         text = text.strip()
         if not text:
             raise ValueError("备忘内容不能为空")
         reminder = None
         if remind_at.strip():
-            reminder = datetime.strptime(remind_at.strip(), "%Y-%m-%d %H:%M").isoformat(timespec="minutes")
+            raw_reminder = remind_at.strip()
+            try:
+                parsed = datetime.fromisoformat(raw_reminder)
+            except ValueError:
+                parsed = datetime.strptime(raw_reminder, "%Y-%m-%d %H:%M")
+            reminder = parsed.isoformat(timespec="minutes")
         self.items.append({
             "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
             "text": text,
             "created": datetime.now().isoformat(timespec="seconds"),
             "remind_at": reminder,
+            "repeat": repeat.strip(),
             "done": False,
             "notified": False,
         })
@@ -661,8 +898,16 @@ class MemoStore:
             remind_at = item.get("remind_at")
             if remind_at and not item.get("done") and not item.get("notified"):
                 if datetime.fromisoformat(remind_at) <= now:
-                    item["notified"] = True
                     result.append(item)
+                    repeat = str(item.get("repeat", ""))
+                    if repeat.startswith("weekly:"):
+                        item["remind_at"] = (datetime.fromisoformat(remind_at) + timedelta(days=7)).isoformat(timespec="minutes")
+                        item["notified"] = False
+                    elif repeat.startswith("daily:"):
+                        item["remind_at"] = (datetime.fromisoformat(remind_at) + timedelta(days=1)).isoformat(timespec="minutes")
+                        item["notified"] = False
+                    else:
+                        item["notified"] = True
         if result:
             self.save()
         return result

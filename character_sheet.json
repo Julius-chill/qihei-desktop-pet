@@ -1,0 +1,15 @@
+{
+  "name": "Julius",
+  "system": "D&D 5e",
+  "skills": {
+    "stealth": 7,
+    "perception": 6,
+    "investigation": 3,
+    "initiative": 0,
+    "scouting": 0
+  },
+  "notes": [
+    "仅记录冒险中已经确认的数值。",
+    "精灵靴会在符合角色卡描述的隐匿检定中提供优势。"
+  ]
+}
