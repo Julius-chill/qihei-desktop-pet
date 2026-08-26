@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from qihei_core import (
-    APIUsageStore, AdventureArchive, CompanionProgress, MemoStore,
+    APIUsageStore, AdventureArchive, CompanionProgress, MemoStore, RavenKeepsakeStore,
     answer_local, ask_openai, explain_openai_http_error, get_openai_api_key, roll_dice,
 )
 from pet import ANIMATION_SHEETS, QiheiPet
@@ -84,6 +84,37 @@ class AdventureArchiveTests(unittest.TestCase):
             self.assertIn("检查黄铜钟锤的磨损", joined)
             self.assertIn("第十二声不在钟里", joined)
             self.assertIn("空槽里原本是什么", joined)
+
+    def test_mission_compass_uses_first_live_action_and_rates_risk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "archive.json"
+            archive = AdventureArchive(path)
+            data = archive.load()
+            data.update({
+                "current_scene": "潜行中的地下暗门前，守卫可能返回",
+                "next_actions": ["检查暗门机关", "调查名字墙"],
+                "active_clues": ["闭眼钥匙尚未试用"],
+                "open_questions": ["灰衣人去了哪里？"],
+            })
+            archive.save(data)
+            compass = archive.mission_compass()
+            self.assertEqual(compass["objective"], "检查暗门机关")
+            self.assertIn(compass["risk"], {"中", "高"})
+            self.assertIn("隐匿", compass["posture"])
+
+
+class RavenKeepsakeTests(unittest.TestCase):
+    def test_unlock_is_unique_and_journal_persists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memories.json"
+            store = RavenKeepsakeStore(path)
+            self.assertTrue(store.unlock("feather", "羽毛", "一枚羽毛", "测试"))
+            self.assertFalse(store.unlock("feather", "另一枚", "不应重复", "测试"))
+            self.assertTrue(store.write_journal("完成第一次测试", unique_key="first-test"))
+            self.assertFalse(store.write_journal("重复事件", unique_key="first-test"))
+            loaded = RavenKeepsakeStore(path).summary()
+            self.assertEqual(len(loaded["keepsakes"]), 1)
+            self.assertEqual(len(loaded["journal"]), 1)
 
 
 class APIUsageTests(unittest.TestCase):
@@ -209,7 +240,7 @@ class AnimationDirectionTests(unittest.TestCase):
 
     def test_grounded_bird_action_sheets_have_six_transparent_cells(self):
         for style in ("pixel", "realistic"):
-            for action in ("look", "peck", "preen"):
+            for action in ("look", "peck", "preen", "stretch"):
                 path, frame_count = ANIMATION_SHEETS[style][action]
                 with self.subTest(style=style, action=action), Image.open(path) as sheet:
                     self.assertEqual(frame_count, 6)

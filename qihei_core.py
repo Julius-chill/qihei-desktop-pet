@@ -235,6 +235,44 @@ class AdventureArchive:
                     hints.append(template.format(text))
         return hints
 
+    def mission_compass(self) -> dict[str, str]:
+        """Condense the live archive into one actionable, evidence-backed objective."""
+        data = self.load()
+
+        def first(key: str, fallback: str) -> str:
+            values = data.get(key, [])
+            if isinstance(values, list):
+                for value in values:
+                    text = str(value).strip()
+                    if text:
+                        return text
+            return fallback
+
+        scene = str(data.get("current_scene", "")).strip() or "当前场景尚未同步"
+        objective = first("next_actions", "先观察现场，等待一条已确认的行动建议。")
+        clue = first("active_clues", "当前没有足够可靠的活跃线索。")
+        question = first("open_questions", "当前没有登记中的未解谜团。")
+        combined = " ".join((scene, objective, clue, question))
+        danger_words = ("敌", "风险", "暗门", "机关", "追踪", "潜行", "返回", "死亡", "陷阱")
+        caution_words = ("调查", "确认", "检查", "未解", "尚待", "选择")
+        danger = sum(word in combined for word in danger_words)
+        caution = sum(word in combined for word in caution_words)
+        if danger >= 3:
+            risk, posture = "高", "保持隐匿，先确认退路，再触碰机关。"
+        elif danger or caution >= 2:
+            risk, posture = "中", "先验证关键物证，避免一次推进多个未知区域。"
+        else:
+            risk, posture = "低", "可以稳步推进，但仍要记录新证据。"
+        return {
+            "scene": scene,
+            "objective": objective,
+            "clue": clue,
+            "question": question,
+            "risk": risk,
+            "posture": posture,
+            "updated_at": str(data.get("updated_at") or "尚未同步"),
+        }
+
     def render(self) -> str:
         data = self.load()
         sections = [
@@ -255,6 +293,64 @@ class AdventureArchive:
             ))
         sections.append(f"\n最后同步：{data.get('updated_at') or '尚未同步'}　来源：{data.get('source', '未知')}")
         return "\n".join(sections)
+
+
+class RavenKeepsakeStore:
+    """Small local collection and diary for shared desktop-pet moments."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.data = self._load()
+
+    @staticmethod
+    def empty() -> dict[str, list[dict[str, str]]]:
+        return {"keepsakes": [], "journal": []}
+
+    def _load(self) -> dict[str, list[dict[str, str]]]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {
+                    "keepsakes": list(data.get("keepsakes", [])),
+                    "journal": list(data.get("journal", [])),
+                }
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+        return self.empty()
+
+    def save(self) -> None:
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def unlock(self, key: str, name: str, description: str, source: str) -> bool:
+        if any(item.get("key") == key for item in self.data["keepsakes"]):
+            return False
+        self.data["keepsakes"].append({
+            "key": key, "name": name, "description": description, "source": source,
+            "time": datetime.now().isoformat(timespec="minutes"),
+        })
+        self.save()
+        return True
+
+    def write_journal(self, text: str, category: str = "共同经历", unique_key: str = "") -> bool:
+        text = text.strip()
+        if not text:
+            return False
+        if unique_key and any(item.get("key") == unique_key for item in self.data["journal"]):
+            return False
+        self.data["journal"].append({
+            "key": unique_key, "time": datetime.now().isoformat(timespec="minutes"),
+            "category": category, "text": text,
+        })
+        self.data["journal"] = self.data["journal"][-120:]
+        self.save()
+        return True
+
+    def summary(self) -> dict[str, list[dict[str, str]]]:
+        self.data = self._load()
+        return {
+            "keepsakes": list(self.data["keepsakes"]),
+            "journal": list(reversed(self.data["journal"])),
+        }
 
 
 @dataclass

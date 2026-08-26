@@ -13,11 +13,12 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
+from typing import Any
 
 from PIL import Image, ImageOps, ImageTk
 
 from qihei_core import (
-    APIUsageStore, AdventureArchive, CompanionProgress, MemoStore,
+    APIUsageStore, AdventureArchive, CompanionProgress, MemoStore, RavenKeepsakeStore,
     ask_openai, get_openai_api_key, roll_dice,
 )
 
@@ -45,6 +46,7 @@ ANIMATION_SHEETS = {
         "look": (BASE_DIR / "assets" / "raven_pixel_look_sheet_v1.png", 6),
         "peck": (BASE_DIR / "assets" / "raven_pixel_peck_sheet_v1.png", 6),
         "preen": (BASE_DIR / "assets" / "raven_pixel_preen_sheet_v1.png", 6),
+        "stretch": (BASE_DIR / "assets" / "raven_pixel_stretch_sheet_v1.png", 6),
     },
     "realistic": {
         "idle": (BASE_DIR / "assets" / "raven_realistic_idle_sheet.png", 4),
@@ -52,6 +54,7 @@ ANIMATION_SHEETS = {
         "look": (BASE_DIR / "assets" / "raven_realistic_look_sheet_v1.png", 6),
         "peck": (BASE_DIR / "assets" / "raven_realistic_peck_sheet_v1.png", 6),
         "preen": (BASE_DIR / "assets" / "raven_realistic_preen_sheet_v1.png", 6),
+        "stretch": (BASE_DIR / "assets" / "raven_realistic_stretch_sheet_v1.png", 6),
     },
 }
 
@@ -65,6 +68,7 @@ ACTION_FPS = {
     "flight": 11.0, "takeoff": 9.0, "landing": 9.0,
     "sleep": 1.35, "sleep_enter": 5.0, "sleep_exit": 5.0,
     "look": 3.2, "peck": 5.4, "preen": 4.2,
+    "ruffle": 6.5, "stretch": 3.8, "cursor_look": 4.2, "hop": 5.5,
 }
 
 
@@ -89,10 +93,13 @@ class QiheiPet:
         self.started = time.perf_counter()
         self.idle_motion_started: float | None = None
         self.next_idle_motion = self.started + random.uniform(8.0, 16.0)
-        self.next_bird_action = self.started + random.uniform(7.0, 15.0)
+        self.next_bird_action = self.started + random.uniform(18.0, 32.0)
+        self.next_cursor_watch = self.started + 3.0
+        self.pointer_near_since: float | None = None
+        self.last_pointer = (self.root.winfo_pointerx(), self.root.winfo_pointery())
         self.facing_left = False
         self.flight: dict[str, float] | None = None
-        self.action: dict[str, float | str] | None = None
+        self.action: dict[str, Any] | None = None
         self.sleeping = False
         progress_data = state.get("companion", {})
         if not progress_data:
@@ -112,6 +119,7 @@ class QiheiPet:
         self.image_item = self.canvas.create_image(PET_SIZE // 2, PET_SIZE // 2)
         self.memo_store = MemoStore(BASE_DIR / "notes.json")
         self.adventure_archive = AdventureArchive(BASE_DIR / "adventure_archive.json")
+        self.keepsakes = RavenKeepsakeStore(BASE_DIR / "raven_memories.json")
         self.api_usage = APIUsageStore(BASE_DIR / "api_usage.json")
         self.api_usage_baseline = self.api_usage.snapshot()
         self.chat_history: list[dict[str, str]] = []
@@ -139,6 +147,7 @@ class QiheiPet:
         pet_menu.add_command(label="出去飞一圈", command=lambda: self.start_flight(True))
         pet_menu.add_command(label="休息 / 醒来", command=self.toggle_sleep)
         pet_menu.add_command(label="查看状态", command=self.show_status)
+        pet_menu.add_command(label="收藏与日记", command=self.open_keepsake_window)
         pet_menu.add_command(label="现在几点", command=self.tell_time)
         self.menu.add_cascade(label="漆黑", menu=pet_menu)
 
@@ -154,6 +163,7 @@ class QiheiPet:
         adventure_menu.add_command(label="羁绊与养成", command=self.open_companion_window)
         adventure_menu.add_command(label="侦察行动", command=self.open_scout_window)
         adventure_menu.add_command(label="DND 骰子", command=self.open_dice_window)
+        adventure_menu.add_command(label="冒险任务罗盘", command=self.open_mission_compass)
         adventure_menu.add_command(label="冒险档案", command=self.open_story_window)
         self.menu.add_cascade(label="DND 冒险", menu=adventure_menu)
 
@@ -234,6 +244,10 @@ class QiheiPet:
         # a tall standing silhouette into the low tucked pose.
         self.frames["sleep_enter"] = [idle, settle, sleep_cycle[0], sleep_cycle[1]]
         self.frames["sleep_exit"] = [sleep_cycle[1], sleep_cycle[0], settle, idle]
+        preen = self.frames["preen"]
+        self.frames["ruffle"] = [preen[0], preen[min(3, len(preen) - 1)],
+                                  preen[min(4, len(preen) - 1)],
+                                  preen[min(3, len(preen) - 1)], preen[0]]
         self.last_render = None
         self.render_image("idle", 0)
 
@@ -377,8 +391,10 @@ class QiheiPet:
 
     def tick(self) -> None:
         now = time.perf_counter()
-        if self.action and now >= float(self.action["until"]):
-            self.action = None
+        if self.action:
+            self.update_ground_action(now)
+            if now >= float(self.action["until"]):
+                self.finish_ground_action()
         flight_progress: float | None = None
         if self.flight and not self.animation_paused.get():
             elapsed = now - self.flight["start"]
@@ -392,11 +408,23 @@ class QiheiPet:
             if progress >= 1:
                 if self.flight.get("reward"):
                     unlock = self.progress.record("flight")
+                    first_flight = self.keepsakes.unlock(
+                        "first_patrol_feather", "巡空羽",
+                        "第一次主动巡空后留下的黑羽。羽缘在光下会透出很细的红金色。",
+                        "桌面巡航",
+                    )
+                    self.keepsakes.write_journal(
+                        "Julius让我出去飞了一圈。航线普通，返航还算体面。",
+                        "巡空记录", "first_reward_flight",
+                    )
+                    if first_flight and not unlock:
+                        unlock = "收藏新增：巡空羽"
                     if unlock:
                         self.say(unlock, 5200)
                 self.flight = None
                 self.save_state()
                 self.root.after(random.randint(24000, 45000), self.start_flight)
+        self.update_cursor_attention(now)
         if (
             not self.flight and not self.sleeping and not self.action
             and self.drag_origin is None and not self.animation_paused.get()
@@ -406,8 +434,17 @@ class QiheiPet:
         if self.animation_paused.get():
             state, frame_index = "idle", 0
         elif self.action:
-            state = str(self.action["name"])
-            frame_index = int((now - float(self.action["started"])) * ACTION_FPS[state]) % len(self.frames[state])
+            action_name = str(self.action["name"])
+            state = str(self.action.get("visual", action_name))
+            sequence = self.action.get("sequence")
+            if isinstance(sequence, tuple) and sequence:
+                elapsed = now - float(self.action["started"])
+                step = min(len(sequence) - 1, int(elapsed * ACTION_FPS.get(action_name, 4.0)))
+                frame_index = min(len(self.frames[state]) - 1, int(sequence[step]))
+            else:
+                frame_index = int(
+                    (now - float(self.action["started"])) * ACTION_FPS.get(action_name, ACTION_FPS.get(state, 4.0))
+                ) % len(self.frames[state])
         elif self.sleeping:
             state = "sleep"
             frame_index = int((now - self.started) * ACTION_FPS[state]) % len(self.frames[state])
@@ -453,14 +490,98 @@ class QiheiPet:
         return breath[int((now - self.started) * 2) % len(breath)]
 
     def start_bird_action(self, now: float | None = None) -> None:
-        """Play one grounded bird gesture without moving the desktop window."""
+        """Let the action director choose one low-frequency, mutually exclusive bird gesture."""
         if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
             return
         started = now if now is not None else time.perf_counter()
-        action_name = random.choices(("look", "peck", "preen"), weights=(5, 3, 2), k=1)[0]
-        duration = len(self.frames[action_name]) / ACTION_FPS[action_name]
-        self.action = {"name": action_name, "started": started, "until": started + duration}
-        self.next_bird_action = started + random.uniform(14.0, 32.0)
+        action_name = random.choices(
+            ("look", "peck", "preen", "ruffle", "stretch", "hop"),
+            weights=(4, 2, 2, 2, 2, 2), k=1,
+        )[0]
+        if action_name == "hop":
+            self.start_hop(started)
+        else:
+            duration = len(self.frames[action_name]) / ACTION_FPS[action_name]
+            self.action = {"name": action_name, "started": started, "until": started + duration}
+        self.next_bird_action = started + random.uniform(28.0, 62.0)
+
+    def update_cursor_attention(self, now: float) -> None:
+        """Watch a nearby cursor after it settles, without turning into a tracking turret."""
+        if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
+            self.pointer_near_since = None
+            return
+        px, py = self.root.winfo_pointerx(), self.root.winfo_pointery()
+        cx = self.root.winfo_x() + PET_SIZE // 2
+        cy = self.root.winfo_y() + PET_SIZE // 2
+        near = math.hypot(px - cx, py - cy) <= 260
+        moved = math.hypot(px - self.last_pointer[0], py - self.last_pointer[1])
+        self.last_pointer = (px, py)
+        if not near or moved > 42:
+            self.pointer_near_since = None
+            return
+        if self.pointer_near_since is None:
+            self.pointer_near_since = now
+            return
+        if now < self.next_cursor_watch or now - self.pointer_near_since < 0.65:
+            return
+        self.orient_toward(px)
+        self.action = {
+            "name": "cursor_look", "visual": "look", "started": now, "until": now + 1.9,
+            "sequence": (0, 1, 2, 3, 3, 2, 1, 0),
+        }
+        self.next_cursor_watch = now + random.uniform(8.0, 14.0)
+        self.next_bird_action = max(self.next_bird_action, now + 12.0)
+        self.pointer_near_since = None
+
+    def orient_toward(self, screen_x: float) -> None:
+        mirror = self.should_mirror_for_flight(
+            self.style.get(), self.root.winfo_x() + PET_SIZE // 2, screen_x,
+        )
+        if mirror != self.facing_left:
+            self.facing_left = mirror
+            self.last_render = None
+
+    def start_hop(self, started: float | None = None) -> None:
+        started = started if started is not None else time.perf_counter()
+        sx, sy = self.root.winfo_x(), self.root.winfo_y()
+        max_x = max(0, self.root.winfo_screenwidth() - PET_SIZE)
+        direction = random.choice((-1, 1))
+        distance = random.randint(24, 44)
+        tx = min(max(0, sx + direction * distance), max_x)
+        if tx == sx:
+            tx = min(max(0, sx - direction * distance), max_x)
+        self.orient_toward(tx + PET_SIZE // 2)
+        duration = 0.82
+        self.action = {
+            "name": "hop", "visual": "idle", "started": started, "until": started + duration,
+            "sx": sx, "sy": sy, "tx": tx, "ty": sy,
+            "sequence": (1, 2, 3, 2, 1, 0),
+        }
+
+    def update_ground_action(self, now: float) -> None:
+        if not self.action or self.action.get("name") != "hop":
+            return
+        duration = max(0.01, float(self.action["until"]) - float(self.action["started"]))
+        progress = min(1.0, max(0.0, (now - float(self.action["started"])) / duration))
+        smooth = progress * progress * (3 - 2 * progress)
+        x = float(self.action["sx"]) + (float(self.action["tx"]) - float(self.action["sx"])) * smooth
+        y = float(self.action["sy"]) - math.sin(math.pi * progress) * 11
+        self.root.geometry(f"+{round(x)}+{round(y)}")
+
+    def finish_ground_action(self) -> None:
+        if not self.action:
+            return
+        name = str(self.action.get("name", ""))
+        if name == "hop":
+            self.root.geometry(f"+{round(float(self.action['tx']))}+{round(float(self.action['ty']))}")
+            self.save_state()
+        elif name == "stretch":
+            self.keepsakes.unlock(
+                "red_gold_down", "红金绒羽",
+                "漆黑伸展后掉下的一枚细羽。不是礼物——至少他坚持这么说。",
+                "自然动作",
+            )
+        self.action = None
 
     def start_flight(self, reward: bool = False) -> None:
         if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
@@ -650,6 +771,11 @@ class QiheiPet:
 
     def open_story_window(self) -> None:
         self.progress.record("story")
+        self.keepsakes.unlock(
+            "archive_thread", "档案红线",
+            "从冒险档案装订处抽下的一段红线，用来提醒我们：事实和猜测要分开放。",
+            "阅读冒险档案",
+        )
         self.save_state()
         window = self.make_tool_window("漆黑的冒险档案", "720x620")
         status = tk.Label(
@@ -686,6 +812,154 @@ class QiheiPet:
             window.after(3000, watch_archive)
 
         window.after(3000, watch_archive)
+
+    def open_mission_compass(self) -> None:
+        new_pin = self.keepsakes.unlock(
+            "compass_pin", "乌鸦罗盘针",
+            "一枚不会指北的细针，只指向当前最值得查的那件事。",
+            "冒险任务罗盘",
+        )
+        self.keepsakes.write_journal(
+            "任务罗盘接通了实时冒险档案。今后一次只盯一个目标，少把谨慎误认为拖延。",
+            "档案联动", "mission_compass_online",
+        )
+        if new_pin:
+            self.say("收藏新增：乌鸦罗盘针。它不指北，只指向麻烦。", 6000)
+
+        window = self.make_tool_window("漆黑 · 冒险任务罗盘", "760x590")
+        window.minsize(620, 500)
+        shell = tk.Frame(window, bg=UI["raven"])
+        shell.pack(fill="both", expand=True, padx=16, pady=(6, 14))
+
+        shaft = tk.Canvas(shell, width=42, bg=UI["raven"], highlightthickness=0)
+        shaft.pack(side="left", fill="y", padx=(0, 10))
+        shaft.create_line(21, 26, 21, 460, fill=UI["gold_dim"], width=2)
+        for y, color in ((64, UI["blood"]), (230, UI["gold"]), (400, UI["blood"])):
+            shaft.create_polygon(21, y - 8, 29, y, 21, y + 8, 13, y,
+                                 fill=color, outline=UI["raven"])
+
+        content = tk.Frame(shell, bg=UI["raven"])
+        content.pack(side="left", fill="both", expand=True)
+        meta = tk.Label(content, text="", bg=UI["raven"], fg=UI["muted"],
+                        anchor="w", font=("Consolas", 8))
+        meta.pack(fill="x", pady=(0, 8))
+        scene = tk.Label(content, text="", bg=UI["panel"], fg=UI["paper"],
+                         anchor="w", justify="left", wraplength=620,
+                         padx=14, pady=12, font=("Microsoft YaHei UI", 9))
+        scene.pack(fill="x")
+
+        objective_card = tk.Frame(content, bg=UI["panel_2"], padx=16, pady=14)
+        objective_card.pack(fill="x", pady=10)
+        tk.Label(objective_card, text="PRIMARY OBJECTIVE", bg=UI["panel_2"], fg=UI["gold"],
+                 anchor="w", font=("Consolas", 8, "bold")).pack(fill="x")
+        objective = tk.Label(objective_card, text="", bg=UI["panel_2"], fg="#FFFFFF",
+                             anchor="w", justify="left", wraplength=590,
+                             font=("Microsoft YaHei UI", 13, "bold"))
+        objective.pack(fill="x", pady=(6, 8))
+        risk = tk.Label(objective_card, text="", bg=UI["blood"], fg="#FFFFFF",
+                        padx=9, pady=3, font=("Microsoft YaHei UI", 8, "bold"))
+        risk.pack(anchor="w")
+        posture = tk.Label(objective_card, text="", bg=UI["panel_2"], fg=UI["paper"],
+                           anchor="w", justify="left", wraplength=590,
+                           font=("Microsoft YaHei UI", 9))
+        posture.pack(fill="x", pady=(8, 0))
+
+        evidence = tk.Frame(content, bg=UI["raven"])
+        evidence.pack(fill="both", expand=True)
+        clue = tk.Label(evidence, text="", bg=UI["panel"], fg=UI["paper"],
+                        anchor="nw", justify="left", wraplength=285, padx=13, pady=12)
+        clue.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        question = tk.Label(evidence, text="", bg=UI["panel"], fg=UI["paper"],
+                            anchor="nw", justify="left", wraplength=285, padx=13, pady=12)
+        question.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+        def reload_compass() -> None:
+            data = self.adventure_archive.mission_compass()
+            meta.configure(text=f"LIVE VECTOR  //  LAST SYNC {data['updated_at']}")
+            scene.configure(text=f"当前位置\n{data['scene']}")
+            objective.configure(text=data["objective"])
+            risk_colors = {"高": "#A83232", "中": "#9A6A2F", "低": "#426C5A"}
+            risk.configure(text=f"风险 {data['risk']}", bg=risk_colors[data["risk"]])
+            posture.configure(text=f"漆黑建议：{data['posture']}")
+            clue.configure(text=f"已知抓手\n\n{data['clue']}")
+            question.configure(text=f"关键未知\n\n{data['question']}")
+
+        buttons = tk.Frame(content, bg=UI["raven"])
+        buttons.pack(fill="x", pady=(10, 0))
+        tk.Button(buttons, text="更新罗盘", command=reload_compass).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        tk.Button(buttons, text="打开完整档案", command=self.open_story_window).pack(
+            side="left", fill="x", expand=True, padx=(5, 0),
+        )
+        reload_compass()
+
+        def watch() -> None:
+            if window.winfo_exists():
+                reload_compass()
+                window.after(3000, watch)
+
+        window.after(3000, watch)
+
+    def open_keepsake_window(self) -> None:
+        self.keepsakes.unlock(
+            "first_quill", "结伴羽签",
+            "漆黑承认这是共同生活的起点，但拒绝把它称作纪念品。",
+            "桌面伙伴",
+        )
+        self.keepsakes.write_journal(
+            "收藏柜和日记建好了。Julius大概会把这叫养成系统；我称之为证物管理。",
+            "共同生活", "keepsake_system_online",
+        )
+        window = self.make_tool_window("漆黑 · 收藏与日记", "780x590")
+        window.minsize(660, 500)
+        body = tk.Frame(window, bg=UI["raven"])
+        body.pack(fill="both", expand=True, padx=16, pady=(8, 14))
+
+        left = tk.Frame(body, bg=UI["panel"], padx=12, pady=12)
+        left.pack(side="left", fill="y", padx=(0, 8))
+        tk.Label(left, text="KEEPSAKES", bg=UI["panel"], fg=UI["gold"],
+                 font=("Consolas", 8, "bold")).pack(anchor="w")
+        keepsake_list = tk.Listbox(left, width=23, height=20, exportselection=False,
+                                   bg=UI["void"], fg=UI["paper"], selectbackground=UI["blood"])
+        keepsake_list.pack(fill="y", expand=True, pady=(8, 0))
+
+        right = tk.Frame(body, bg=UI["raven"])
+        right.pack(side="left", fill="both", expand=True)
+        detail = tk.Label(right, text="", bg=UI["panel_2"], fg=UI["paper"],
+                          anchor="nw", justify="left", wraplength=485,
+                          padx=14, pady=12, font=("Microsoft YaHei UI", 9))
+        detail.pack(fill="x")
+        tk.Label(right, text="RAVEN JOURNAL", bg=UI["raven"], fg=UI["gold"],
+                 anchor="w", font=("Consolas", 8, "bold")).pack(fill="x", pady=(12, 5))
+        journal = tk.Text(right, bg=UI["panel"], fg=UI["paper"], wrap="word",
+                          font=("Microsoft YaHei UI", 9), padx=13, pady=11,
+                          relief="flat", state="disabled")
+        journal.pack(fill="both", expand=True)
+
+        snapshot = self.keepsakes.summary()
+        items = snapshot["keepsakes"]
+        for item in items:
+            keepsake_list.insert("end", f"◆ {item.get('name', '未命名证物')}")
+
+        def select_item(_event: tk.Event | None = None) -> None:
+            selection = keepsake_list.curselection()
+            if not selection:
+                detail.configure(text="选择一件收藏，查看它来自哪段共同经历。")
+                return
+            item = items[selection[0]]
+            detail.configure(
+                text=f"{item.get('name', '')}\n\n{item.get('description', '')}\n\n"
+                     f"来源：{item.get('source', '')}  //  {item.get('time', '')}"
+            )
+
+        keepsake_list.bind("<<ListboxSelect>>", select_item)
+        select_item()
+        lines = []
+        for entry in snapshot["journal"]:
+            stamp = str(entry.get("time", "")).replace("T", " ")
+            lines.append(f"{stamp}  //  {entry.get('category', '')}\n{entry.get('text', '')}")
+        journal.configure(state="normal")
+        journal.insert("1.0", "\n\n".join(lines) if lines else "还没有值得归档的共同经历。")
+        journal.configure(state="disabled")
 
     def open_question_window(self) -> None:
         window = self.make_tool_window("向漆黑提问", "680x560")
@@ -1280,6 +1554,16 @@ class QiheiPet:
             self.adventure_archive.append_event(
                 f"{name}：{outcome['text']} {narrative}", category="漆黑侦察",
             )
+            if outcome["success"]:
+                self.keepsakes.unlock(
+                    "scout_wax", "侦察蜡印",
+                    "一次可靠侦察后压下的闭眼蜡印。它证明这里记的是情报，不是猜测。",
+                    name,
+                )
+                self.keepsakes.write_journal(
+                    f"侦察目标“{name}”取得{outcome['quality']}。可靠内容已经写进冒险档案。",
+                    "侦察记录",
+                )
             result.insert("end", f"目标：{name}\n{description}\n\n{outcome['text']}\n\n{narrative}")
             self.save_state()
             self.say(f"{name}：{outcome['quality']}。{narrative}", 7600)
@@ -1308,10 +1592,21 @@ class QiheiPet:
             self.say(f"专注哨开始：{duration} 分钟。我盯着时间，你盯着任务。", 5200)
             def complete() -> None:
                 unlock = self.progress.record("focus")
+                new_keepsake = self.keepsakes.unlock(
+                    "focus_quill", "专注羽签",
+                    "完成第一轮专注哨后留下的羽签。背面写着：别切窗口。",
+                    f"{duration}分钟专注哨",
+                )
+                self.keepsakes.write_journal(
+                    f"共同守完了{duration}分钟专注哨。Julius没有在计时结束前逃跑。",
+                    "专注记录",
+                )
                 self.save_state()
                 message = "专注时间到。停手，伸展，喝水。命令，不是建议。"
                 if unlock:
                     message += "\n" + unlock
+                elif new_keepsake:
+                    message += "\n收藏新增：专注羽签"
                 self.say(message, 10000)
             self.root.after(duration * 60 * 1000, complete)
 
