@@ -11,18 +11,23 @@ import threading
 import time
 import traceback
 import tkinter as tk
+import urllib.error
+import urllib.request
 import webbrowser
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 from typing import Any
 
 from PIL import Image, ImageOps, ImageTk
 
 from qihei_core import (
-    APIUsageStore, AdventureArchive, CharacterSheet, CombatTrackerStore,
-    CompanionProgress, MemoStore, RavenKeepsakeStore, ask_openai,
-    get_openai_api_key, parse_natural_reminder, roll_dice, search_everything,
+    APIUsageStore, AdventureArchive, AdventureSessionStore, CharacterSheet,
+    CombatTrackerStore, CompanionMemoryStore, CompanionProgress, DropBagStore,
+    EmotionState, EventDirector, MemoStore, RavenKeepsakeStore, ask_openai,
+    build_adventure_timeline, get_openai_api_key, parse_natural_reminder,
+    roll_dice, search_everything,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -35,6 +40,11 @@ EVERYTHING_CONFIG = BASE_DIR / "everything_qihei.ini"
 EVERYTHING_INSTANCE = "Qihei"
 CHARACTER_FILE = BASE_DIR / "character_sheet.json"
 COMBAT_FILE = BASE_DIR / "combat_tracker.json"
+MEMORY_FILE = BASE_DIR / "companion_memory.json"
+SESSION_FILE = BASE_DIR / "adventure_session.json"
+DROP_BAG_FILE = BASE_DIR / "drop_bag.json"
+BACKUP_DIR = BASE_DIR / "backups"
+PID_FILE = BASE_DIR / "qihei.pid"
 TRANSPARENT = "#010203"
 PET_SIZE = 112
 IMAGE_SIZE = 94
@@ -96,6 +106,15 @@ class QiheiPet:
         self.canvas.pack()
 
         state = self.load_state()
+        recovered_after_interrupt = state.get("last_shutdown_clean", True) is False
+        self.clean_shutdown = False
+        self.possible_duplicate = False
+        try:
+            previous_pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+            self.possible_duplicate = previous_pid != os.getpid() and self.process_exists(previous_pid)
+        except (OSError, ValueError):
+            pass
+        PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
         self.style = tk.StringVar(value=state.get("style", "pixel"))
         if self.style.get() not in STYLES:
             self.style.set("pixel")
@@ -114,6 +133,11 @@ class QiheiPet:
         self.perched_window: int | None = None
         self.perch_offset = 0.67
         self.keepsake_display: tk.Toplevel | None = None
+        self.session_hud: tk.Toplevel | None = None
+        self.nest_window: tk.Toplevel | None = None
+        self.directed_steps: list[dict[str, Any]] = []
+        self.window_visits: dict[str, int] = dict(state.get("window_visits", {})) if isinstance(state.get("window_visits"), dict) else {}
+        self.last_window_title = ""
         self.facing_left = False
         self.flight: dict[str, Any] | None = None
         self.action: dict[str, Any] | None = None
@@ -137,6 +161,11 @@ class QiheiPet:
         self.memo_store = MemoStore(BASE_DIR / "notes.json")
         self.adventure_archive = AdventureArchive(BASE_DIR / "adventure_archive.json")
         self.keepsakes = RavenKeepsakeStore(BASE_DIR / "raven_memories.json")
+        self.memories = CompanionMemoryStore(MEMORY_FILE)
+        self.emotion = EmotionState.from_dict(state.get("emotion", {}))
+        self.director = EventDirector()
+        self.session = AdventureSessionStore(SESSION_FILE)
+        self.drop_bag = DropBagStore(DROP_BAG_FILE)
         self.character_sheet = CharacterSheet(CHARACTER_FILE)
         self.combat = CombatTrackerStore(COMBAT_FILE)
         self.last_brief_date = str(state.get("last_brief_date", ""))
@@ -163,6 +192,8 @@ class QiheiPet:
             "selectcolor": UI["gold"], "bd": 0,
         }
         self.menu = tk.Menu(self.root, **menu_style)
+        self.menu.add_command(label="打开鸦巢控制台", command=self.open_nest_console)
+        self.menu.add_separator()
 
         pet_menu = tk.Menu(self.menu, **menu_style)
         pet_menu.add_command(label="出去飞一圈", command=lambda: self.start_flight(True))
@@ -171,6 +202,8 @@ class QiheiPet:
         pet_menu.add_command(label="收藏与日记", command=self.open_keepsake_window)
         pet_menu.add_command(label="展示收藏", command=self.toggle_keepsake_display)
         pet_menu.add_command(label="停在当前窗口", command=self.perch_on_foreground_window)
+        pet_menu.add_command(label="沿窗沿走一段", command=self.stroll_on_titlebar)
+        pet_menu.add_command(label="从屏幕边缘探头", command=self.peek_from_edge)
         pet_menu.add_command(label="现在几点", command=self.tell_time)
         self.menu.add_cascade(label="漆黑", menu=pet_menu)
 
@@ -179,6 +212,7 @@ class QiheiPet:
         work_menu.add_command(label="备忘录与提醒", command=self.open_memo_window)
         work_menu.add_command(label="快捷指令", command=self.open_command_palette)
         work_menu.add_command(label="搜索文件", command=self.open_everything_search)
+        work_menu.add_command(label="乌鸦投递袋", command=self.open_drop_bag)
         work_menu.add_separator()
         work_menu.add_command(label="打开 Geek", command=self.launch_geek)
         work_menu.add_command(label="打开 Everything", command=self.launch_everything)
@@ -191,11 +225,14 @@ class QiheiPet:
         adventure_menu.add_command(label="先攻与战斗", command=self.open_combat_window)
         adventure_menu.add_command(label="冒险任务罗盘", command=self.open_mission_compass)
         adventure_menu.add_command(label="线索关系图", command=self.open_clue_graph)
+        adventure_menu.add_command(label="开始 / 结束冒险模式", command=self.toggle_adventure_mode)
+        adventure_menu.add_command(label="冒险时间线", command=self.open_adventure_timeline)
         adventure_menu.add_command(label="冒险档案", command=self.open_story_window)
         self.menu.add_cascade(label="DND 冒险", menu=adventure_menu)
 
         intelligence_menu = tk.Menu(self.menu, **menu_style)
         intelligence_menu.add_command(label="向漆黑提问", command=self.open_question_window)
+        intelligence_menu.add_command(label="长期记忆", command=self.open_memory_window)
         intelligence_menu.add_command(label="API 使用情况", command=self.open_api_usage_window)
         intelligence_menu.add_command(label="API 密钥设置", command=self.open_api_key_window)
         self.menu.add_cascade(label="问答与 API", menu=intelligence_menu)
@@ -211,6 +248,7 @@ class QiheiPet:
         self.settings_menu.add_command(label="安静一会儿", command=self.toggle_quiet)
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="隐藏 5 分钟", command=self.hide_temporarily)
+        self.settings_menu.add_command(label="自检与备份", command=self.open_diagnostics)
         self.menu.add_cascade(label="设置", menu=self.settings_menu)
         self.menu.add_separator()
         self.menu.add_command(label="退出", command=self.close)
@@ -230,10 +268,33 @@ class QiheiPet:
         self.root.after(60000, self.update_vitals)
         self.root.after(10000, self.check_archive_update)
         self.root.after(30000, self.context_clock)
+        if self.session.data.get("active"):
+            self.root.after(1400, self.open_session_hud)
+        if recovered_after_interrupt:
+            self.root.after(2200, lambda: self.say("上次撤离不够体面。位置和进行中的记录已经恢复。", 6200))
+        if self.possible_duplicate:
+            self.root.after(2800, lambda: self.say("检测到另一只漆黑可能仍在巡逻。若看见重影，请关闭其中一个实例。", 7200))
+        self.save_state()
 
     @property
     def affection(self) -> int:
         return self.progress.bond
+
+    @staticmethod
+    def process_exists(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if sys.platform.startswith("win"):
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
     @affection.setter
     def affection(self, value: int) -> None:
@@ -429,6 +490,21 @@ class QiheiPet:
             self.update_ground_action(now)
             if now >= float(self.action["until"]):
                 self.finish_ground_action()
+        if (
+            not self.action and not self.flight and not self.sleeping
+            and self.drag_origin is None and not self.animation_paused.get()
+        ):
+            if not self.directed_steps:
+                scene = self.director.next_scene()
+                if scene:
+                    self.emotion.trigger(str(scene["emotion"]))
+                    actions = list(scene.get("actions", []))
+                    self.directed_steps = [
+                        {"action": action, "text": scene.get("text", "") if index == 0 else ""}
+                        for index, action in enumerate(actions)
+                    ]
+            if self.directed_steps:
+                self.play_directed_step(now)
         flight_progress: float | None = None
         if self.flight and not self.animation_paused.get():
             elapsed = now - self.flight["start"]
@@ -438,7 +514,7 @@ class QiheiPet:
             x = self.flight["sx"] + (self.flight["tx"] - self.flight["sx"]) * smooth
             y = (self.flight["sy"] + (self.flight["ty"] - self.flight["sy"]) * smooth
                  - math.sin(math.pi * progress) * self.flight["arc"])
-            self.root.geometry(f"+{int(x)}+{int(y)}")
+            self.move_pet(x, y)
             if progress >= 1:
                 landing_perch = int(self.flight.get("perch_hwnd", 0) or 0)
                 if self.flight.get("reward"):
@@ -459,6 +535,7 @@ class QiheiPet:
                 self.flight = None
                 if landing_perch and self.window_rect(landing_perch):
                     self.perched_window = landing_perch
+                self.emotion.trigger("flight")
                 self.save_state()
                 self.root.after(random.randint(24000, 45000), self.start_flight)
         self.update_cursor_attention(now)
@@ -508,6 +585,23 @@ class QiheiPet:
             self.place_keepsake_display()
         self.root.after(33, self.tick)
 
+    def play_directed_step(self, now: float | None = None) -> None:
+        if not self.directed_steps or self.action or self.flight or self.sleeping:
+            return
+        step = self.directed_steps.pop(0)
+        action_name = str(step.get("action", "look"))
+        started = now if now is not None else time.perf_counter()
+        if action_name == "hop":
+            self.start_hop(started)
+        else:
+            visual = "look" if action_name == "cursor_look" else action_name
+            if visual not in self.frames:
+                visual = "look"
+            duration = max(0.8, len(self.frames[visual]) / ACTION_FPS.get(action_name, ACTION_FPS.get(visual, 4.0)))
+            self.action = {"name": action_name, "visual": visual, "started": started, "until": started + duration}
+        if str(step.get("text", "")).strip():
+            self.say(str(step["text"]), 7200)
+
     def idle_frame(self, now: float) -> int:
         """Mostly hold a calm pose, with occasional non-periodic idle gestures."""
         frame_count = len(self.frames["idle"])
@@ -533,9 +627,15 @@ class QiheiPet:
         if self.flight or self.sleeping or self.action or self.drag_origin is not None or self.animation_paused.get():
             return
         started = now if now is not None else time.perf_counter()
+        emotion_weights = {
+            "警觉": (7, 1, 1, 4, 1, 3), "好奇": (6, 5, 1, 1, 1, 2),
+            "得意": (2, 1, 1, 4, 6, 2), "担忧": (5, 1, 5, 2, 1, 1),
+            "困惑": (7, 2, 2, 2, 1, 1), "安心": (2, 1, 6, 1, 3, 1),
+            "专注": (6, 2, 1, 1, 1, 1), "振奋": (3, 2, 1, 3, 5, 4),
+        }
+        weights = emotion_weights.get(self.emotion.label, (4, 2, 2, 2, 2, 2))
         action_name = random.choices(
-            ("look", "peck", "preen", "ruffle", "stretch", "hop"),
-            weights=(4, 2, 2, 2, 2, 2), k=1,
+            ("look", "peck", "preen", "ruffle", "stretch", "hop"), weights=weights, k=1,
         )[0]
         if action_name == "hop":
             self.start_hop(started)
@@ -591,6 +691,7 @@ class QiheiPet:
         )
         if head_distance < 38:
             if self.progress.bond >= 55:
+                self.emotion.trigger("pet")
                 self.action = {
                     "name": "preen", "started": now,
                     "until": now + len(self.frames["preen"]) / ACTION_FPS["preen"],
@@ -631,6 +732,26 @@ class QiheiPet:
             return None
         return result
 
+    @staticmethod
+    def window_class(hwnd: int) -> str:
+        if not sys.platform.startswith("win") or not hwnd:
+            return ""
+        buffer = ctypes.create_unicode_buffer(128)
+        return buffer.value if ctypes.windll.user32.GetClassNameW(hwnd, buffer, len(buffer)) else ""
+
+    def virtual_screen_bounds(self) -> tuple[int, int, int, int]:
+        if sys.platform.startswith("win"):
+            left = int(ctypes.windll.user32.GetSystemMetrics(76))
+            top = int(ctypes.windll.user32.GetSystemMetrics(77))
+            width = int(ctypes.windll.user32.GetSystemMetrics(78))
+            height = int(ctypes.windll.user32.GetSystemMetrics(79))
+            if width > 0 and height > 0:
+                return left, top, left + width, top + height
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def move_pet(self, x: float, y: float) -> None:
+        self.root.geometry(f"{round(x):+d}{round(y):+d}")
+
     def remember_foreground_window(self) -> None:
         if not sys.platform.startswith("win"):
             return
@@ -641,6 +762,13 @@ class QiheiPet:
         ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
         if process_id.value != os.getpid() and self.window_rect(hwnd):
             self.last_external_window = hwnd
+            window_class = self.window_class(hwnd)
+            if window_class and window_class != self.last_window_title:
+                self.last_window_title = window_class
+                self.window_visits[window_class] = min(9999, int(self.window_visits.get(window_class, 0)) + 1)
+                if len(self.window_visits) > 40:
+                    least_used = min(self.window_visits, key=self.window_visits.get)
+                    self.window_visits.pop(least_used, None)
 
     def perch_on_foreground_window(self) -> None:
         self.remember_foreground_window()
@@ -662,10 +790,30 @@ class QiheiPet:
             return
         left, top, right, _bottom = rect
         x = round(left + (right - left) * self.perch_offset - PET_SIZE // 2)
-        max_x = max(0, self.root.winfo_screenwidth() - PET_SIZE)
-        x = min(max(0, x), max_x)
-        y = max(0, top - PET_SIZE + 31)
-        self.root.geometry(f"+{x}+{y}")
+        screen_left, screen_top, screen_right, _screen_bottom = self.virtual_screen_bounds()
+        x = min(max(screen_left, x), screen_right - PET_SIZE)
+        y = max(screen_top, top - PET_SIZE + 31)
+        self.move_pet(x, y)
+
+    def stroll_on_titlebar(self) -> None:
+        if not self.perched_window:
+            self.perch_on_foreground_window()
+        if not self.perched_window or not self.window_rect(self.perched_window):
+            return
+        self.start_hop(evade=False)
+        self.director.emit("ambient", "巡查窗沿。别担心，我不会踩你的关闭按钮。", "titlebar-stroll")
+
+    def peek_from_edge(self) -> None:
+        if self.flight or self.action or self.sleeping:
+            return
+        left, top, right, bottom = self.virtual_screen_bounds()
+        side = random.choice(("left", "right"))
+        y = random.randint(top + 80, max(top + 80, bottom - PET_SIZE - 90))
+        x = left - PET_SIZE // 2 if side == "left" else right - PET_SIZE // 2
+        self.perched_window = None
+        self.move_pet(x, y)
+        self.orient_toward(left + 200 if side == "left" else right - 200)
+        self.director.emit("ambient", "边界清晰。外面没有另一个桌面，暂时。", "edge-peek")
 
     def orient_toward(self, screen_x: float) -> None:
         mirror = self.should_mirror_for_flight(
@@ -678,7 +826,8 @@ class QiheiPet:
     def start_hop(self, started: float | None = None, evade: bool = False) -> None:
         started = started if started is not None else time.perf_counter()
         sx, sy = self.root.winfo_x(), self.root.winfo_y()
-        max_x = max(0, self.root.winfo_screenwidth() - PET_SIZE)
+        screen_left, _screen_top, screen_right, _screen_bottom = self.virtual_screen_bounds()
+        min_x, max_x = screen_left, screen_right - PET_SIZE
         pointer_direction = 1 if self.root.winfo_pointerx() > sx + PET_SIZE // 2 else -1
         if evade or self.progress.bond < 30:
             direction = -pointer_direction
@@ -687,9 +836,9 @@ class QiheiPet:
         else:
             direction = random.choice((-1, 1))
         distance = random.randint(24, 44)
-        tx = min(max(0, sx + direction * distance), max_x)
+        tx = min(max(min_x, sx + direction * distance), max_x)
         if tx == sx:
-            tx = min(max(0, sx - direction * distance), max_x)
+            tx = min(max(min_x, sx - direction * distance), max_x)
         self.orient_toward(tx + PET_SIZE // 2)
         duration = 0.82
         self.action = {
@@ -706,14 +855,14 @@ class QiheiPet:
         smooth = progress * progress * (3 - 2 * progress)
         x = float(self.action["sx"]) + (float(self.action["tx"]) - float(self.action["sx"])) * smooth
         y = float(self.action["sy"]) - math.sin(math.pi * progress) * 11
-        self.root.geometry(f"+{round(x)}+{round(y)}")
+        self.move_pet(x, y)
 
     def finish_ground_action(self) -> None:
         if not self.action:
             return
         name = str(self.action.get("name", ""))
         if name == "hop":
-            self.root.geometry(f"+{round(float(self.action['tx']))}+{round(float(self.action['ty']))}")
+            self.move_pet(float(self.action["tx"]), float(self.action["ty"]))
             if self.perched_window:
                 rect = self.window_rect(self.perched_window)
                 if rect:
@@ -738,11 +887,13 @@ class QiheiPet:
             return
         self.perched_window = None
         sx, sy = self.root.winfo_x(), self.root.winfo_y()
-        max_x = max(15, self.root.winfo_screenwidth() - PET_SIZE - 15)
-        max_y = max(15, self.root.winfo_screenheight() - PET_SIZE - 55)
+        screen_left, screen_top, screen_right, screen_bottom = self.virtual_screen_bounds()
+        min_x, min_y = screen_left + 15, screen_top + 15
+        max_x = max(min_x, screen_right - PET_SIZE - 15)
+        max_y = max(min_y, screen_bottom - PET_SIZE - 55)
         if self.follow_cursor.get():
-            tx = min(max(15, self.root.winfo_pointerx() - PET_SIZE // 2), max_x)
-            ty = min(max(15, self.root.winfo_pointery() - PET_SIZE - 25), max_y)
+            tx = min(max(min_x, self.root.winfo_pointerx() - PET_SIZE // 2), max_x)
+            ty = min(max(min_y, self.root.winfo_pointery() - PET_SIZE - 25), max_y)
             perch_hwnd = None
         else:
             perch_rect = self.window_rect(self.last_external_window or 0)
@@ -750,14 +901,14 @@ class QiheiPet:
                 left, top, right, _bottom = perch_rect
                 self.perch_offset = random.uniform(0.28, 0.74)
                 tx = round(left + (right - left) * self.perch_offset - PET_SIZE // 2)
-                tx = min(max(15, tx), max_x)
-                ty = min(max(0, top - PET_SIZE + 31), max_y)
+                tx = min(max(min_x, tx), max_x)
+                ty = min(max(screen_top, top - PET_SIZE + 31), max_y)
                 perch_hwnd = self.last_external_window
             else:
-                tx, ty = random.randint(15, max_x), random.randint(15, max_y)
+                tx, ty = random.randint(min_x, max_x), random.randint(min_y, max_y)
                 perch_hwnd = None
         if abs(tx - sx) < 260 and not perch_hwnd:
-            tx = 15 if sx > max_x / 2 else max_x
+            tx = min_x if sx > (min_x + max_x) / 2 else max_x
         # The generated pixel sheet faces left, while the realistic sheet faces
         # right. Each appearance therefore needs its own mirroring rule.
         should_mirror = self.should_mirror_for_flight(self.style.get(), sx, tx)
@@ -776,17 +927,21 @@ class QiheiPet:
         return (target_x > source_x) if source_faces_left else (target_x < source_x)
 
     def restore_position(self, state: dict[str, object]) -> None:
-        max_x = max(0, self.root.winfo_screenwidth() - PET_SIZE)
-        max_y = max(0, self.root.winfo_screenheight() - PET_SIZE - 35)
+        screen_left, screen_top, screen_right, screen_bottom = self.virtual_screen_bounds()
+        max_x = screen_right - PET_SIZE
+        max_y = screen_bottom - PET_SIZE - 35
         try:
             x, y = int(state["x"]), int(state["y"])
         except (ValueError, KeyError, TypeError):
             x, y = max_x - 25, max_y - 25
-        self.root.geometry(f"{PET_SIZE}x{PET_SIZE}+{min(max(0, x), max_x)}+{min(max(0, y), max_y)}")
+        x, y = min(max(screen_left, x), max_x), min(max(screen_top, y), max_y)
+        self.root.geometry(f"{PET_SIZE}x{PET_SIZE}{x:+d}{y:+d}")
 
     def save_state(self) -> None:
         data = {"x": self.root.winfo_x(), "y": self.root.winfo_y(), "style": self.style.get(),
-                "companion": self.progress.to_dict(), "last_brief_date": self.last_brief_date}
+                "companion": self.progress.to_dict(), "last_brief_date": self.last_brief_date,
+                "emotion": self.emotion.to_dict(), "window_visits": self.window_visits,
+                "last_shutdown_clean": self.clean_shutdown}
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def say(self, text: str, duration: int = 4800) -> None:
@@ -817,9 +972,10 @@ class QiheiPet:
         width = 310
         self.bubble_canvas.configure(width=width, height=height)
         self.bubble_canvas.delete("all")
+        screen_left, _screen_top, screen_right, _screen_bottom = self.virtual_screen_bounds()
         bubble_x = min(
-            max(8, self.root.winfo_x() - width + PET_SIZE // 2 + 25),
-            self.root.winfo_screenwidth() - width - 8,
+            max(screen_left + 8, self.root.winfo_x() - width + PET_SIZE // 2 + 25),
+            screen_right - width - 8,
         )
         pet_center_x = self.root.winfo_x() + PET_SIZE // 2
         tail_tip = min(width - 25, max(30, pet_center_x - bubble_x))
@@ -837,7 +993,7 @@ class QiheiPet:
         self.bubble_canvas.create_line(18, 34, width - 18, 34, fill="#6f542c", width=1)
         self.bubble_canvas.create_oval(18, 17, 25, 24, fill="#d43b32", outline="")
         self.bubble_canvas.create_text(
-            31, 21, text=f"漆黑 · {self.progress.mood}", anchor="w",
+            31, 21, text=f"漆黑 · {self.emotion.label}", anchor="w",
             fill="#d5aa53", font=("Microsoft YaHei UI", 8, "bold"),
         )
         self.bubble_text_item = self.bubble_canvas.create_text(
@@ -847,9 +1003,11 @@ class QiheiPet:
 
     def place_bubble(self) -> None:
         width, height = int(self.bubble_canvas["width"]), int(self.bubble_canvas["height"])
-        x = min(max(8, self.root.winfo_x() - width + PET_SIZE // 2 + 25),
-                self.root.winfo_screenwidth() - width - 8)
-        self.bubble.geometry(f"+{x}+{max(8, self.root.winfo_y() - height + 20)}")
+        screen_left, screen_top, screen_right, screen_bottom = self.virtual_screen_bounds()
+        x = min(max(screen_left + 8, self.root.winfo_x() - width + PET_SIZE // 2 + 25),
+                screen_right - width - 8)
+        y = min(max(screen_top + 8, self.root.winfo_y() - height + 20), screen_bottom - height - 8)
+        self.bubble.geometry(f"{x:+d}{y:+d}")
 
     def hide_bubble(self) -> None:
         self.bubble.withdraw()
@@ -926,6 +1084,389 @@ class QiheiPet:
                     activebackground=UI["gold"], highlightthickness=0,
                 )
             self.style_tool_children(widget)
+
+    def open_nest_console(self) -> None:
+        if self.nest_window and self.nest_window.winfo_exists():
+            self.nest_window.deiconify()
+            self.nest_window.lift()
+            return
+        window = self.make_tool_window("漆黑 · 鸦巢控制台", "980x660")
+        window.minsize(860, 590)
+        self.nest_window = window
+        window.protocol("WM_DELETE_WINDOW", lambda: (setattr(self, "nest_window", None), window.destroy()))
+
+        body = tk.Frame(window, bg=UI["raven"])
+        body.pack(fill="both", expand=True, padx=14, pady=(5, 14))
+        rail = tk.Frame(body, bg=UI["void"], width=180, padx=10, pady=10)
+        rail.pack(side="left", fill="y")
+        rail.pack_propagate(False)
+        center = tk.Frame(body, bg=UI["panel"])
+        center.pack(side="left", fill="both", expand=True, padx=(10, 10))
+        feed = tk.Frame(body, bg=UI["void"], width=245, padx=10, pady=10)
+        feed.pack(side="right", fill="y")
+        feed.pack_propagate(False)
+
+        tk.Label(rail, text="NEST ROUTES", bg=UI["void"], fg=UI["gold"],
+                 font=("Consolas", 9, "bold"), anchor="w").pack(fill="x", pady=(0, 10))
+        routes = (
+            ("向漆黑提问", self.open_question_window), ("长期记忆", self.open_memory_window),
+            ("乌鸦投递袋", self.open_drop_bag), ("冒险模式", self.toggle_adventure_mode),
+            ("冒险时间线", self.open_adventure_timeline), ("任务罗盘", self.open_mission_compass),
+            ("先攻与战斗", self.open_combat_window), ("自检与备份", self.open_diagnostics),
+        )
+        for label, command in routes:
+            tk.Button(rail, text=label, command=command, anchor="w").pack(fill="x", pady=3)
+
+        scene = tk.Canvas(center, bg=UI["panel"], highlightthickness=0)
+        scene.pack(fill="both", expand=True)
+        scene.configure(cursor="hand2")
+        scene.bind("<Button-1>", lambda _event: self.open_keepsake_window())
+        tk.Label(feed, text="INTELLIGENCE PULSE", bg=UI["void"], fg=UI["gold"],
+                 font=("Consolas", 9, "bold"), anchor="w").pack(fill="x")
+        event_list = tk.Listbox(feed, bg=UI["void"], fg=UI["paper"], font=("Microsoft YaHei UI", 8),
+                                selectbackground=UI["blood"], activestyle="none")
+        event_list.pack(fill="both", expand=True, pady=(8, 0))
+
+        timeline = build_adventure_timeline(
+            self.adventure_archive.load(), self.keepsakes.summary(), self.session.data,
+        )
+        for item in timeline[:12]:
+            event_list.insert("end", f"{str(item.get('at', ''))[5:16]}  {item.get('category', '')}")
+            event_list.insert("end", f"  {str(item.get('text', ''))[:28]}")
+        if not timeline:
+            event_list.insert("end", "尚无事件。鸦巢正在等待第一封情报。")
+
+        phase = {"value": 0.0}
+        keepsakes = self.keepsakes.summary()["keepsakes"][-6:]
+
+        def draw() -> None:
+            if not window.winfo_exists():
+                return
+            scene.delete("all")
+            width, height = max(520, scene.winfo_width()), max(480, scene.winfo_height())
+            cx, cy = width // 2, height // 2 + 25
+            scene.create_text(24, 24, anchor="nw", text="THE RAVEN'S TABLE",
+                              fill=UI["gold"], font=("Consolas", 10, "bold"))
+            scene.create_text(24, 48, anchor="nw",
+                              text=f"{self.progress.bond_rank}  /  {self.emotion.label}  /  侦察 {self.progress.ability}",
+                              fill=UI["muted"], font=("Microsoft YaHei UI", 9))
+            # Signature: a living red intelligence network feeding the nest.
+            phase["value"] += 0.11
+            points: list[float] = []
+            for index in range(21):
+                x = 26 + index * (width - 52) / 20
+                y = 88 + math.sin(phase["value"] + index * .55) * (4 + self.emotion.intensity / 24)
+                points.extend((x, y))
+            scene.create_line(*points, fill=UI["blood"], width=2, smooth=True)
+            scene.create_oval(cx - 125, cy - 72, cx + 125, cy + 72,
+                              fill=UI["void"], outline=UI["gold_dim"], width=3)
+            for ring in range(4):
+                scene.create_arc(cx - 130 - ring * 5, cy - 76 - ring * 3,
+                                 cx + 130 + ring * 5, cy + 76 + ring * 3,
+                                 start=195 + ring * 9, extent=145, style="arc",
+                                 outline="#4B3724", width=3)
+            scene.create_text(cx, cy - 13, text="漆黑的鸦巢", fill=UI["paper"],
+                              font=("Microsoft YaHei UI", 17, "bold"))
+            objective = self.adventure_archive.mission_compass()["objective"]
+            scene.create_text(cx, cy + 22, text=objective[:36], width=310,
+                              fill=UI["gold"], font=("Microsoft YaHei UI", 9))
+            for index, item in enumerate(keepsakes):
+                angle = math.pi * (0.18 + index / max(1, len(keepsakes) - 1) * 0.64)
+                x = cx - math.cos(angle) * 190
+                y = cy + math.sin(angle) * 120
+                scene.create_oval(x - 18, y - 18, x + 18, y + 18,
+                                  fill=UI["panel_2"], outline=UI["gold"], width=2)
+                scene.create_text(x, y, text=str(item.get("name", "?"))[:2], fill=UI["paper"],
+                                  font=("Microsoft YaHei UI", 8, "bold"))
+            scene.create_text(cx, height - 38,
+                              text=f"记忆 {sum(len(v) for v in self.memories.data.values())}  ·  "
+                                   f"收藏 {len(keepsakes)}  ·  "
+                                   f"冒险模式 {'ACTIVE' if self.session.data.get('active') else 'STANDBY'}",
+                              fill=UI["muted"], font=("Consolas", 9))
+            scene.create_text(cx, height - 19, text="点击鸦巢查看收藏与共同日记",
+                              fill=UI["gold_dim"], font=("Microsoft YaHei UI", 8))
+            window.after(120, draw)
+
+        window.after_idle(draw)
+
+    def open_memory_window(self) -> None:
+        window = self.make_tool_window("漆黑 · 长期记忆", "780x590")
+        window.minsize(660, 500)
+        tk.Label(window, text="只记录明确陈述。你可以随时增删；这些内容仅在相关时参与对话。",
+                 bg=UI["raven"], fg=UI["muted"], anchor="w").pack(fill="x", padx=16, pady=(7, 8))
+        categories = {"事实": "facts", "偏好": "preferences", "共同经历": "shared_events", "近期事项": "temporary"}
+        category = tk.StringVar(value="偏好")
+        selector = tk.OptionMenu(window, category, *categories.keys())
+        selector.pack(fill="x", padx=16)
+        memory_list = tk.Listbox(window, font=("Microsoft YaHei UI", 9), height=15)
+        memory_list.pack(fill="both", expand=True, padx=16, pady=8)
+        entry = tk.Entry(window, font=("Microsoft YaHei UI", 10))
+        entry.pack(fill="x", padx=16, ipady=6)
+
+        def refresh() -> None:
+            memory_list.delete(0, "end")
+            key = categories[category.get()]
+            for item in self.memories.data[key]:
+                memory_list.insert("end", f"{str(item.get('at', ''))[:10]}  {item.get('text', '')}")
+            if not self.memories.data[key]:
+                memory_list.insert("end", "这一栏还是空的。")
+
+        def add() -> None:
+            if self.memories.remember(categories[category.get()], entry.get(), "记忆面板手动确认"):
+                entry.delete(0, "end")
+                refresh()
+
+        def forget() -> None:
+            selection = memory_list.curselection()
+            key = categories[category.get()]
+            if selection and self.memories.data[key]:
+                self.memories.forget(key, selection[0])
+                refresh()
+
+        buttons = tk.Frame(window, bg=UI["raven"])
+        buttons.pack(fill="x", padx=16, pady=(8, 14))
+        tk.Button(buttons, text="记住", command=add).pack(side="left")
+        tk.Button(buttons, text="忘掉选中", command=forget).pack(side="left", padx=6)
+        tk.Button(buttons, text="清空近期事项", command=lambda: (self.memories.clear_temporary(), refresh())).pack(side="right")
+        category.trace_add("write", lambda *_args: refresh())
+        refresh()
+
+    def toggle_adventure_mode(self) -> None:
+        if self.session.data.get("active"):
+            summary = self.session.stop()
+            count = len(summary.get("events", [])) if summary else 0
+            text = f"本次冒险模式结束，共记录 {count} 条跑团事件。正式剧情档案没有被自动改写。"
+            self.keepsakes.write_journal(text, "跑团记录")
+            self.memories.remember("shared_events", text, "冒险模式")
+            if self.session_hud and self.session_hud.winfo_exists():
+                self.session_hud.destroy()
+            self.session_hud = None
+            self.say(text, 6500)
+            return
+        scene = str(self.adventure_archive.load().get("current_scene", ""))
+        self.session.start(scene)
+        self.director.emit("story_update", "冒险模式启动。闲聊频道收束，骰子、战斗和线索记录就位。", "session-start")
+        self.open_session_hud()
+
+    def open_session_hud(self) -> None:
+        if not self.session.data.get("active"):
+            self.session.start(str(self.adventure_archive.load().get("current_scene", "")))
+        if self.session_hud and self.session_hud.winfo_exists():
+            self.session_hud.lift()
+            return
+        hud = tk.Toplevel(self.root)
+        self.session_hud = hud
+        hud.title("漆黑 · 冒险模式")
+        hud.attributes("-topmost", True)
+        hud.configure(bg=UI["void"])
+        hud.geometry(f"430x172+{max(10, self.root.winfo_screenwidth() - 455)}+48")
+        hud.resizable(False, False)
+        label = tk.Label(hud, bg=UI["void"], fg=UI["paper"], justify="left", anchor="nw",
+                         font=("Microsoft YaHei UI", 9), padx=14, pady=12, wraplength=395)
+        label.pack(fill="both", expand=True)
+        controls = tk.Frame(hud, bg=UI["void"])
+        controls.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Button(controls, text="骰子", command=self.open_dice_window).pack(side="left")
+        tk.Button(controls, text="战斗", command=self.open_combat_window).pack(side="left", padx=5)
+        tk.Button(controls, text="线索", command=self.open_clue_graph).pack(side="left")
+        tk.Button(controls, text="结束冒险", command=self.toggle_adventure_mode).pack(side="right")
+        hud.protocol("WM_DELETE_WINDOW", lambda: hud.withdraw())
+
+        def refresh() -> None:
+            if not hud.winfo_exists() or not self.session.data.get("active"):
+                return
+            data = self.adventure_archive.load()
+            objective = self.adventure_archive.mission_compass()["objective"]
+            combatants = self.combat.data.get("combatants", [])
+            combat = f"第{self.combat.data['round']}轮 / {len(combatants)}名参战者" if combatants else "未进入战斗"
+            label.configure(text=f"ADVENTURE MODE  ● LIVE\n{str(data.get('current_scene', ''))[:48]}\n目标：{objective[:44]}\n{combat}")
+            hud.after(2500, refresh)
+        refresh()
+
+    def open_adventure_timeline(self) -> None:
+        window = self.make_tool_window("漆黑 · 冒险时间线", "860x620")
+        window.minsize(720, 520)
+        timeline = build_adventure_timeline(self.adventure_archive.load(), self.keepsakes.summary(), self.session.data)
+        entries = tk.Listbox(window, font=("Consolas", 9), height=16)
+        entries.pack(fill="both", expand=True, padx=16, pady=(7, 8))
+        detail = tk.Text(window, height=7, wrap="word", state="disabled", font=("Microsoft YaHei UI", 9))
+        detail.pack(fill="x", padx=16)
+        for item in timeline:
+            entries.insert("end", f"{str(item.get('at', ''))[:16]:<16}  {str(item.get('category', '')):<10}  {str(item.get('text', ''))[:42]}")
+        if not timeline:
+            entries.insert("end", "尚无可显示的时间线事件。")
+
+        def inspect(_event: tk.Event | None = None) -> None:
+            selected = entries.curselection()
+            if not selected or selected[0] >= len(timeline):
+                return
+            item = timeline[selected[0]]
+            detail.configure(state="normal")
+            detail.delete("1.0", "end")
+            detail.insert("1.0", f"{item.get('at', '')}  //  {item.get('category', '')}\n\n{item.get('text', '')}")
+            detail.configure(state="disabled")
+        entries.bind("<<ListboxSelect>>", inspect)
+        tk.Label(window, text="正式档案、漆黑日记与跑团临时记录分源展示；时间线不会反写剧情。",
+                 bg=UI["raven"], fg=UI["muted"], anchor="w").pack(fill="x", padx=16, pady=(8, 14))
+
+    def open_drop_bag(self) -> None:
+        window = self.make_tool_window("漆黑 · 乌鸦投递袋", "800x590")
+        window.minsize(680, 510)
+        tk.Label(window, text="投递文件或剪贴板文字，再决定打开、设为待办或加入本次冒险。",
+                 bg=UI["raven"], fg=UI["muted"], anchor="w").pack(fill="x", padx=16, pady=(7, 8))
+        items = tk.Listbox(window, font=("Microsoft YaHei UI", 9), height=12)
+        items.pack(fill="both", expand=True, padx=16)
+        preview = tk.Text(window, height=6, wrap="word", state="disabled", font=("Microsoft YaHei UI", 9))
+        preview.pack(fill="x", padx=16, pady=8)
+
+        def refresh() -> None:
+            items.delete(0, "end")
+            for item in reversed(self.drop_bag.items):
+                marker = "FILE" if item.get("kind") == "file" else "TEXT"
+                items.insert("end", f"[{marker}] {item.get('name', '')}  // {item.get('status', '')}")
+            if not self.drop_bag.items:
+                items.insert("end", "投递袋是空的。可以先放一张任务纸条进来。")
+
+        def selected() -> tuple[int, dict[str, Any]] | None:
+            selection = items.curselection()
+            if not selection or not self.drop_bag.items:
+                return None
+            index = len(self.drop_bag.items) - 1 - selection[0]
+            return index, self.drop_bag.items[index]
+
+        def inspect(_event: tk.Event | None = None) -> None:
+            pair = selected()
+            if not pair:
+                return
+            _index, item = pair
+            content = str(item.get("content", ""))
+            if item.get("kind") == "file":
+                path = Path(content)
+                if path.suffix.lower() in {".txt", ".md", ".json", ".csv", ".py"}:
+                    try:
+                        content = path.read_text(encoding="utf-8", errors="replace")[:6000]
+                    except OSError:
+                        pass
+            preview.configure(state="normal")
+            preview.delete("1.0", "end")
+            preview.insert("1.0", content)
+            preview.configure(state="disabled")
+
+        def add_files() -> None:
+            for value in filedialog.askopenfilenames(parent=window, title="投递给漆黑"):
+                self.drop_bag.add_file(Path(value))
+            refresh()
+
+        def add_clipboard() -> None:
+            try:
+                self.drop_bag.add_text(self.root.clipboard_get())
+                refresh()
+            except (tk.TclError, ValueError) as error:
+                self.say(str(error), 4500)
+
+        def open_item() -> None:
+            pair = selected()
+            if not pair:
+                return
+            _index, item = pair
+            if item.get("kind") == "file":
+                os.startfile(str(item.get("content", "")))
+            else:
+                self.open_question_window(str(item.get("content", "")))
+
+        def make_memo() -> None:
+            pair = selected()
+            if not pair:
+                return
+            index, item = pair
+            self.memo_store.add(f"处理投递：{item.get('name', '')}")
+            self.drop_bag.mark(index, "已转为待办")
+            refresh()
+
+        def add_to_session() -> None:
+            pair = selected()
+            if not pair or not messagebox.askyesno("加入冒险", "将它作为待审阅材料加入本次冒险记录？\n不会写入正式剧情档案。", parent=window):
+                return
+            index, item = pair
+            if self.session.data.get("active"):
+                self.session.log("待审材料", str(item.get("name", "")))
+            else:
+                self.memories.remember("temporary", f"待审冒险材料：{item.get('name', '')}", "乌鸦投递袋")
+            self.drop_bag.mark(index, "已交给冒险模式")
+            refresh()
+
+        items.bind("<<ListboxSelect>>", inspect)
+        controls = tk.Frame(window, bg=UI["raven"])
+        controls.pack(fill="x", padx=16, pady=(0, 14))
+        for label, command in (("选择文件", add_files), ("读取剪贴板", add_clipboard), ("打开 / 提问", open_item), ("转为待办", make_memo), ("加入冒险", add_to_session)):
+            tk.Button(controls, text=label, command=command).pack(side="left", padx=(0, 5))
+        refresh()
+
+    def open_diagnostics(self) -> None:
+        window = self.make_tool_window("漆黑 · 自检与备份", "760x600")
+        window.minsize(640, 520)
+        report = tk.Text(window, wrap="word", state="disabled", font=("Consolas", 9))
+        report.pack(fill="both", expand=True, padx=16, pady=(7, 8))
+
+        def run_checks() -> None:
+            checks: list[tuple[str, bool, str]] = []
+            required = [STATE_FILE, CHARACTER_FILE, BASE_DIR / "adventure_archive.json"]
+            for path in required:
+                checks.append((path.name, path.exists(), str(path)))
+            animation_files = {path for style in ANIMATION_SHEETS.values() for path, _count in style.values()}
+            checks.append(("动画资源", all(path.is_file() for path in animation_files), f"{sum(path.is_file() for path in animation_files)}/{len(animation_files)}"))
+            checks.append(("OpenAI API", bool(get_openai_api_key()), "已配置" if get_openai_api_key() else "未配置；本地问答仍可用"))
+            checks.append(("Everything", EVERYTHING_EXE.is_file() and EVERYTHING_DB.is_file(), str(EVERYTHING_EXE)))
+            checks.append(("冒险档案来源", self.adventure_archive.load().get("source_thread_id") == "6a7acf96-fe8c-83ea-9d3c-ca945089d12e", str(self.adventure_archive.load().get("source_thread_id", ""))))
+            lines = ["SYSTEM HEALTH / 漆黑自检\n"]
+            for name, ok, detail in checks:
+                lines.append(f"[{'OK' if ok else '!!'}] {name:<18} {detail}")
+            lines.append(f"\n短期情绪：{self.emotion.label} ({self.emotion.intensity:.0f})")
+            lines.append(f"长期记忆：{sum(len(v) for v in self.memories.data.values())} 条")
+            lines.append(f"投递袋：{len(self.drop_bag.items)} 项")
+            lines.append(f"冒险模式：{'运行中' if self.session.data.get('active') else '未开启'}")
+            favorite = max(self.window_visits, key=self.window_visits.get) if self.window_visits else "尚未形成"
+            lines.append(f"常驻窗口类型：{favorite}")
+            lines.append(f"重复实例：{'可能存在' if self.possible_duplicate else '未发现'}")
+            lines.append(f"上次档案同步：{self.adventure_archive.load().get('updated_at', '未知')}")
+            report.configure(state="normal")
+            report.delete("1.0", "end")
+            report.insert("1.0", "\n".join(lines))
+            report.configure(state="disabled")
+
+        def backup() -> None:
+            BACKUP_DIR.mkdir(exist_ok=True)
+            destination = BACKUP_DIR / f"qihei-backup-{datetime.now():%Y%m%d-%H%M%S}.zip"
+            candidates = [STATE_FILE, BASE_DIR / "notes.json", BASE_DIR / "raven_memories.json", MEMORY_FILE, SESSION_FILE, DROP_BAG_FILE, COMBAT_FILE, BASE_DIR / "adventure_archive.json", BASE_DIR / "api_usage.json"]
+            with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in candidates:
+                    if path.is_file():
+                        archive.write(path, path.name)
+            self.say(f"备份完成：{destination.name}", 5200)
+
+        def check_update() -> None:
+            def worker() -> None:
+                try:
+                    request = urllib.request.Request(
+                        "https://api.github.com/repos/Julius-chill/qihei-desktop-pet/commits/master",
+                        headers={"User-Agent": "Qihei-Desktop-Pet"},
+                    )
+                    with urllib.request.urlopen(request, timeout=10) as response:
+                        remote = str(json.loads(response.read().decode("utf-8")).get("sha", ""))
+                    ref = BASE_DIR / ".git" / "refs" / "heads" / "master"
+                    local = ref.read_text(encoding="utf-8").strip() if ref.is_file() else ""
+                    message = "当前已经是 GitHub 最新版本。" if remote and remote == local else "GitHub 上有不同版本，可以打开仓库检查更新。"
+                except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError) as error:
+                    message = f"暂时无法检查更新：{type(error).__name__}"
+                self.root.after(0, lambda: self.say(message, 5600))
+            threading.Thread(target=worker, daemon=True).start()
+
+        controls = tk.Frame(window, bg=UI["raven"])
+        controls.pack(fill="x", padx=16, pady=(0, 14))
+        tk.Button(controls, text="重新自检", command=run_checks).pack(side="left")
+        tk.Button(controls, text="备份本地数据", command=backup).pack(side="left", padx=6)
+        tk.Button(controls, text="检查 GitHub 更新", command=check_update).pack(side="right")
+        run_checks()
 
     def open_story_window(self) -> None:
         self.progress.record("story")
@@ -1157,12 +1698,13 @@ class QiheiPet:
             return
         self.keepsake_display.update_idletasks()
         width = self.keepsake_display.winfo_reqwidth()
-        x = min(max(0, self.root.winfo_x() + PET_SIZE // 2 - width // 2),
-                self.root.winfo_screenwidth() - width)
+        screen_left, screen_top, screen_right, screen_bottom = self.virtual_screen_bounds()
+        x = min(max(screen_left, self.root.winfo_x() + PET_SIZE // 2 - width // 2),
+                screen_right - width)
         y = self.root.winfo_y() + PET_SIZE - 8
-        if y + 62 > self.root.winfo_screenheight() - 38:
-            y = max(0, self.root.winfo_y() - 58)
-        self.keepsake_display.geometry(f"+{x}+{y}")
+        if y + 62 > screen_bottom - 38:
+            y = max(screen_top, self.root.winfo_y() - 58)
+        self.keepsake_display.geometry(f"{x:+d}{y:+d}")
 
     def open_command_palette(self) -> None:
         window = self.make_tool_window("漆黑 · 快捷指令", "690x400")
@@ -1173,7 +1715,7 @@ class QiheiPet:
         ).pack(fill="x", padx=18, pady=(10, 4))
         tk.Label(
             window,
-            text="找 文件名　·　记 内容　·　提醒 半小时后喝水　·　骰 d20+3　·　冒险　·　战斗　·　问……",
+            text="找 文件名 · 记 内容 · 提醒 半小时后喝水 · 骰 d20+3 · 鸦巢 · 冒险模式 · 时间线 · 投递 · 自检 · 问……",
             bg=UI["raven"], fg=UI["muted"], anchor="w", wraplength=640,
             font=("Microsoft YaHei UI", 9),
         ).pack(fill="x", padx=18, pady=(0, 10))
@@ -1216,6 +1758,13 @@ class QiheiPet:
                              f"骰面：{outcome['rolls']}\n{outcome['comment']}",
                         fg=UI["gold"],
                     )
+                    if self.session.data.get("active"):
+                        self.session.log("骰子", f"{outcome['expression']} → {outcome['total']}")
+                    if outcome.get("sides") == 20 and outcome.get("natural") in {1, 20}:
+                        self.director.emit(
+                            "critical_success" if outcome["natural"] == 20 else "critical_failure",
+                            outcome["comment"], f"command-roll:{time.time_ns()}",
+                        )
                 elif raw in {"冒险", "任务", "罗盘"}:
                     window.destroy()
                     self.open_mission_compass()
@@ -1223,6 +1772,30 @@ class QiheiPet:
                 elif raw in {"战斗", "先攻"}:
                     window.destroy()
                     self.open_combat_window()
+                    return
+                elif raw in {"鸦巢", "控制台"}:
+                    window.destroy()
+                    self.open_nest_console()
+                    return
+                elif raw in {"冒险模式", "开团", "结束冒险"}:
+                    window.destroy()
+                    self.toggle_adventure_mode()
+                    return
+                elif raw in {"时间线", "冒险时间线"}:
+                    window.destroy()
+                    self.open_adventure_timeline()
+                    return
+                elif raw in {"投递", "投递袋"}:
+                    window.destroy()
+                    self.open_drop_bag()
+                    return
+                elif raw in {"记忆", "长期记忆"}:
+                    window.destroy()
+                    self.open_memory_window()
+                    return
+                elif raw in {"自检", "诊断", "备份"}:
+                    window.destroy()
+                    self.open_diagnostics()
                     return
                 else:
                     local = self.character_sheet.answer(raw)
@@ -1416,6 +1989,11 @@ class QiheiPet:
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": answer},
             ])
+            learned = self.memories.learn_from_message(user_text)
+            if learned:
+                append_transcript("本地记忆", "已记住：" + "；".join(learned), "system")
+            if "失联" in answer or "失败" in answer or "额度" in answer:
+                self.director.emit("api_error", "情报线有杂音。我已经保留本地档案答复。")
             unlock = self.progress.record("conversation")
             self.save_state()
             if unlock:
@@ -1440,6 +2018,8 @@ class QiheiPet:
                 try:
                     answer = self.character_sheet.answer(user_text) or ask_openai(
                         user_text, self.chat_history, self.api_usage,
+                        memory_context=self.memories.context(),
+                        archive_context=self.adventure_archive.render(),
                     )
                 except Exception as error:  # Keep the UI recoverable even if a local store fails.
                     answer = f"情报通道出了点意外（{type(error).__name__}）。再问一次，我不会装死。"
@@ -1761,10 +2341,18 @@ class QiheiPet:
                 refresh()
                 roster.selection_set(index)
 
+        def next_turn() -> None:
+            self.combat.next_turn()
+            if self.session.data.get("active") and self.combat.data["combatants"]:
+                turn = int(self.combat.data["turn"])
+                actor = self.combat.data["combatants"][turn]["name"]
+                self.session.log("战斗", f"第{self.combat.data['round']}轮：轮到{actor}")
+            refresh()
+
         controls = tk.Frame(window, bg=UI["raven"])
         controls.pack(fill="x", padx=16, pady=(0, 8))
         tk.Button(controls, text="加入战斗", command=add).pack(side="left", padx=(0, 5))
-        tk.Button(controls, text="下一回合", command=lambda: (self.combat.next_turn(), refresh())).pack(side="left", padx=5)
+        tk.Button(controls, text="下一回合", command=next_turn).pack(side="left", padx=5)
         tk.Button(controls, text="HP -1", command=lambda: adjust(-1)).pack(side="left", padx=5)
         tk.Button(controls, text="HP +1", command=lambda: adjust(1)).pack(side="left", padx=5)
         tk.Button(controls, text="更新状态", command=set_selected_status).pack(side="left", padx=5)
@@ -1914,7 +2502,17 @@ class QiheiPet:
             history.insert(0, line)
             result_number.configure(text=str(outcome["total"]), fg=UI["gold"])
             result_label.configure(text=f"{outcome['expression']}  //  {detail}\n{outcome['comment']}", fg=UI["paper"])
-            self.say(f"{outcome['expression']}：{outcome['total']}。{outcome['comment']}", 5200)
+            spoken = f"{outcome['expression']}：{outcome['total']}。{outcome['comment']}"
+            if self.session.data.get("active"):
+                self.session.log("骰子", line)
+            natural = outcome.get("natural")
+            if outcome.get("sides") == 20 and natural in {1, 20}:
+                self.director.emit(
+                    "critical_success" if natural == 20 else "critical_failure",
+                    spoken, f"roll:{time.time_ns()}",
+                )
+            else:
+                self.say(spoken, 5200)
 
         tk.Button(top, text="投掷", width=9, command=roll).pack(side="right", fill="y")
 
@@ -2102,6 +2700,8 @@ class QiheiPet:
                 "name": "preen", "started": time.perf_counter(),
                 "until": time.perf_counter() + len(self.frames["preen"]) / ACTION_FPS["preen"],
             }
+        elif idle_seconds > 7 * 60 and not self.sleeping and not self.action and random.random() < 0.08:
+            self.peek_from_edge()
         self.root.after(60000, self.context_clock)
 
     def check_archive_update(self) -> None:
@@ -2109,13 +2709,12 @@ class QiheiPet:
         stamp = str(data.get("updated_at", ""))
         if stamp and self.last_archive_stamp and stamp != self.last_archive_stamp:
             self.last_archive_stamp = stamp
-            if not self.flight and not self.sleeping and not self.action:
-                now = time.perf_counter()
-                self.action = {
-                    "name": "ruffle", "started": now,
-                    "until": now + len(self.frames["ruffle"]) / ACTION_FPS["ruffle"],
-                }
-            self.say("档案有新动静。情报已经入库，要看时打开任务罗盘。", 6500)
+            self.director.emit(
+                "story_update", "档案有新动静。情报已经入库，要看时打开任务罗盘。",
+                f"archive:{stamp}",
+            )
+            if self.session.data.get("active"):
+                self.session.log("档案更新", "正式冒险档案已同步新内容")
             self.keepsakes.write_journal(
                 "冒险档案出现新进展。没有在桌面气泡里剧透，只发出了情报提醒。",
                 "档案联动", f"archive:{stamp}",
@@ -2130,7 +2729,7 @@ class QiheiPet:
             f"{mode} · {self.progress.mood}\n"
             f"羁绊 Lv.{self.progress.level}「{self.progress.bond_rank}」 · 亲密 {self.progress.bond}\n"
             f"侦察 Lv.{self.progress.scout_level}「{self.progress.ability}」 · 精力 {round(self.energy)}\n"
-            f"相处姿态：{self.progress.personality_profile['stance']}",
+            f"相处姿态：{self.progress.personality_profile['stance']} · 短期情绪：{self.emotion.label}",
             7600,
         )
 
@@ -2210,6 +2809,8 @@ class QiheiPet:
             self.adventure_archive.append_event(
                 f"{name}：{outcome['text']} {narrative}", category="漆黑侦察",
             )
+            if self.session.data.get("active"):
+                self.session.log("侦察", f"{name}：{outcome['quality']}（{outcome['total']} vs DC {outcome['dc']}）")
             # This write comes from the pet itself, so do not announce it as an
             # externally synchronized story update on the next archive poll.
             self.last_archive_stamp = str(
@@ -2268,19 +2869,25 @@ class QiheiPet:
                     message += "\n" + unlock
                 elif new_keepsake:
                     message += "\n收藏新增：专注羽签"
-                self.say(message, 10000)
+                self.director.emit("focus_done", message, f"focus:{time.time_ns()}")
             self.root.after(duration * 60 * 1000, complete)
 
         tk.Button(window, text="开始专注", command=start, width=14).pack(pady=6)
 
     def check_reminders(self) -> None:
         for item in self.memo_store.due():
-            self.say(f"提醒：{item['text']}\n时间到了。别装没看见，嘎。", 9000)
+            self.director.emit(
+                "reminder", f"提醒：{item['text']}\n时间到了。别装没看见，嘎。",
+                f"reminder:{item.get('id', '')}:{item.get('remind_at', '')}",
+            )
         self.root.after(30000, self.check_reminders)
 
     def schedule_chatter(self) -> None:
         hour = datetime.now().hour
-        interval = (85000, 150000) if 9 <= hour < 18 else (55000, 105000)
+        if self.session.data.get("active"):
+            interval = (180000, 300000)
+        else:
+            interval = (85000, 150000) if 9 <= hour < 18 else (55000, 105000)
         self.root.after(random.randint(*interval), self.idle_chatter)
 
     def idle_chatter(self) -> None:
@@ -2295,7 +2902,9 @@ class QiheiPet:
             task_hints = self.adventure_archive.task_hints()
             # Most reports should move the live campaign forward; ordinary raven
             # chatter keeps the pet from sounding like a quest log with wings.
-            if random.random() < 0.12:
+            if self.session.data.get("active") and task_hints:
+                lines = task_hints
+            elif random.random() < 0.12:
                 lines = [self.progress.personality_profile["line"]]
             else:
                 lines = task_hints if task_hints and random.random() < 0.65 else mood_lines[self.progress.mood]
@@ -2363,7 +2972,13 @@ class QiheiPet:
         self.drag_origin = None
 
     def close(self) -> None:
+        self.clean_shutdown = True
         self.save_state()
+        try:
+            if PID_FILE.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                PID_FILE.unlink()
+        except OSError:
+            pass
         self.root.destroy()
 
     def run(self) -> None:

@@ -9,6 +9,11 @@ api_usage.json.tmp
 raven_memories.json
 combat_tracker.json
 everything_qihei.ini
+companion_memory.json
+adventure_session.json
+drop_bag.json
+backups/
+qihei.pid
 assets/models/
 assets/qihei*.png
 assets/raven_2d_concept_v2.png

@@ -9,9 +9,11 @@ from pathlib import Path
 from PIL import Image
 
 from qihei_core import (
-    APIUsageStore, AdventureArchive, CharacterSheet, CombatTrackerStore,
-    CompanionProgress, MemoStore, RavenKeepsakeStore, answer_local, ask_openai,
-    explain_openai_http_error, get_openai_api_key, parse_natural_reminder, roll_dice,
+    APIUsageStore, AdventureArchive, AdventureSessionStore, CharacterSheet,
+    CombatTrackerStore, CompanionMemoryStore, CompanionProgress, DropBagStore,
+    EmotionState, EventDirector, MemoStore, RavenKeepsakeStore, answer_local,
+    ask_openai, build_adventure_timeline, explain_openai_http_error,
+    get_openai_api_key, parse_natural_reminder, roll_dice,
 )
 from pet import ANIMATION_SHEETS, QiheiPet
 
@@ -142,6 +144,64 @@ class RavenKeepsakeTests(unittest.TestCase):
             loaded = RavenKeepsakeStore(path).summary()
             self.assertEqual(len(loaded["keepsakes"]), 1)
             self.assertEqual(len(loaded["journal"]), 1)
+
+
+class CompanionSystemTests(unittest.TestCase):
+    def test_memory_learns_only_explicit_statements_and_can_forget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CompanionMemoryStore(Path(directory) / "memory.json")
+            learned = store.learn_from_message("以后叫我Julius，我喜欢调查旧钟楼")
+            self.assertTrue(any("称呼" in item for item in learned))
+            self.assertTrue(any("喜欢" in item for item in learned))
+            self.assertIn("Julius", store.context())
+            store.forget("preferences", 0)
+            self.assertEqual(len(store.data["preferences"]), 1)
+
+    def test_memory_does_not_infer_from_a_question(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CompanionMemoryStore(Path(directory) / "memory.json")
+            self.assertEqual(store.learn_from_message("你觉得我应该信任谁？"), [])
+
+    def test_emotion_triggers_and_decays(self):
+        emotion = EmotionState()
+        self.assertEqual(emotion.trigger("critical_success"), "得意")
+        emotion.decay(emotion.updated_at + 60 * 60)
+        self.assertEqual(emotion.label, "冷静")
+
+    def test_event_director_prioritizes_story_over_ambient(self):
+        director = EventDirector()
+        director.emit("ambient", "看看")
+        director.emit("story_update", "新剧情")
+        self.assertEqual(director.next_scene()["event"], "story_update")
+
+    def test_adventure_session_archives_completed_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AdventureSessionStore(Path(directory) / "session.json")
+            self.assertTrue(store.start("地下圆厅"))
+            store.log("骰子", "d20 → 18")
+            summary = store.stop()
+            self.assertFalse(store.data["active"])
+            self.assertEqual(len(summary["events"]), 2)
+            self.assertEqual(len(store.data["sessions"]), 1)
+
+    def test_drop_bag_accepts_text_and_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "clue.txt"
+            path.write_text("线索", encoding="utf-8")
+            bag = DropBagStore(root / "bag.json")
+            bag.add_text("检查暗门")
+            bag.add_file(path)
+            self.assertEqual([item["kind"] for item in bag.items], ["text", "file"])
+
+    def test_timeline_keeps_sources_separate_and_sorted(self):
+        timeline = build_adventure_timeline(
+            {"updated_at": "2026-08-31T10:00:00", "current_scene": "暗门前", "recent_events": []},
+            {"journal": [{"time": "2026-08-30T09:00", "category": "日记", "text": "旧事"}]},
+            {"events": [{"at": "2026-08-31T11:00:00", "category": "骰子", "text": "20"}], "sessions": []},
+        )
+        self.assertEqual(timeline[0]["category"], "骰子")
+        self.assertEqual(timeline[-1]["category"], "日记")
 
 
 class APIUsageTests(unittest.TestCase):

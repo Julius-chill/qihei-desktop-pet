@@ -354,6 +354,274 @@ class RavenKeepsakeStore:
         }
 
 
+class CompanionMemoryStore:
+    """Small, user-editable long-term memory with conservative extraction rules."""
+
+    CATEGORIES = ("facts", "preferences", "shared_events", "temporary")
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.data = self._load()
+
+    @classmethod
+    def empty(cls) -> dict[str, list[dict[str, str]]]:
+        return {key: [] for key in cls.CATEGORIES}
+
+    def _load(self) -> dict[str, list[dict[str, str]]]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return self.empty()
+        data = self.empty()
+        if isinstance(raw, dict):
+            for key in self.CATEGORIES:
+                values = raw.get(key, [])
+                if isinstance(values, list):
+                    data[key] = [item for item in values if isinstance(item, dict)]
+        return data
+
+    def save(self) -> None:
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def remember(self, category: str, text: str, source: str = "用户确认") -> bool:
+        category = category if category in self.CATEGORIES else "facts"
+        text = re.sub(r"\s+", " ", text).strip(" ，。")
+        if not text:
+            raise ValueError("记忆内容不能为空")
+        normalized = text.casefold()
+        if any(str(item.get("text", "")).casefold() == normalized for item in self.data[category]):
+            return False
+        self.data[category].append({
+            "id": datetime.now().strftime("%Y%m%d%H%M%S%f"), "text": text,
+            "source": source, "at": datetime.now().isoformat(timespec="seconds"),
+        })
+        self.data[category] = self.data[category][-80:]
+        self.save()
+        return True
+
+    def forget(self, category: str, index: int) -> None:
+        if category not in self.CATEGORIES:
+            raise KeyError(category)
+        self.data[category].pop(index)
+        self.save()
+
+    def clear_temporary(self) -> None:
+        self.data["temporary"] = []
+        self.save()
+
+    def learn_from_message(self, text: str) -> list[str]:
+        """Only learn explicit first-person statements; never infer hidden traits."""
+        learned: list[str] = []
+        rules = (
+            ("preferences", r"(?:以后)?叫我\s*([^，。！？]{1,24})", "称呼偏好：{}"),
+            ("preferences", r"我(?:很)?喜欢\s*([^，。！？]{1,40})", "喜欢：{}"),
+            ("preferences", r"我不喜欢\s*([^，。！？]{1,40})", "不喜欢：{}"),
+            ("temporary", r"我(?:最近|现在|正在)\s*([^，。！？]{2,60})", "当前事项：{}"),
+            ("facts", r"我(?:信任|怀疑|警惕)\s*([^，。！？]{1,40})", "冒险态度：{}"),
+        )
+        for category, pattern, template in rules:
+            match = re.search(pattern, text)
+            if match:
+                memory = template.format(match.group(1).strip())
+                if self.remember(category, memory, "对话中的明确陈述"):
+                    learned.append(memory)
+        return learned
+
+    def context(self, limit: int = 16) -> str:
+        labels = {"facts": "已确认事实", "preferences": "用户偏好", "shared_events": "共同经历", "temporary": "近期事项"}
+        lines: list[str] = []
+        for category in self.CATEGORIES:
+            for item in self.data[category][-max(1, limit // 4):]:
+                lines.append(f"- {labels[category]}：{item.get('text', '')}")
+        return "\n".join(lines[-limit:])
+
+
+@dataclass
+class EmotionState:
+    """Short-lived feelings layered over the slower companion mood values."""
+
+    name: str = "冷静"
+    intensity: float = 0.0
+    updated_at: float = field(default_factory=time.time)
+
+    EVENT_MAP = {
+        "story_update": ("警觉", 78), "critical_success": ("得意", 90),
+        "critical_failure": ("担忧", 72), "reminder": ("专注", 58),
+        "api_error": ("困惑", 62), "pet": ("安心", 45),
+        "flight": ("振奋", 52), "idle": ("好奇", 38),
+    }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "EmotionState":
+        if not isinstance(data, dict):
+            return cls()
+        try:
+            return cls(str(data.get("name", "冷静")), max(0.0, min(100.0, float(data.get("intensity", 0)))), float(data.get("updated_at", time.time())))
+        except (TypeError, ValueError):
+            return cls()
+
+    def to_dict(self) -> dict[str, Any]:
+        self.decay()
+        return {"name": self.name, "intensity": round(self.intensity, 2), "updated_at": self.updated_at}
+
+    def trigger(self, event: str) -> str:
+        name, intensity = self.EVENT_MAP.get(event, ("好奇", 35))
+        self.name, self.intensity, self.updated_at = name, float(intensity), time.time()
+        return self.name
+
+    def decay(self, now: float | None = None) -> None:
+        current = now if now is not None else time.time()
+        elapsed_minutes = max(0.0, (current - self.updated_at) / 60.0)
+        if elapsed_minutes:
+            self.intensity = max(0.0, self.intensity - elapsed_minutes * 1.8)
+            self.updated_at = current
+            if self.intensity < 8:
+                self.name = "冷静"
+
+    @property
+    def label(self) -> str:
+        self.decay()
+        return self.name if self.intensity >= 8 else "冷静"
+
+
+class EventDirector:
+    """Priority queue that turns app events into coherent animation scenes."""
+
+    BLUEPRINTS: dict[str, dict[str, Any]] = {
+        "story_update": {"priority": 90, "emotion": "story_update", "actions": ("ruffle", "look")},
+        "critical_success": {"priority": 85, "emotion": "critical_success", "actions": ("stretch", "ruffle")},
+        "critical_failure": {"priority": 82, "emotion": "critical_failure", "actions": ("look", "preen")},
+        "reminder": {"priority": 75, "emotion": "reminder", "actions": ("look", "hop")},
+        "focus_done": {"priority": 72, "emotion": "reminder", "actions": ("stretch", "look")},
+        "api_error": {"priority": 68, "emotion": "api_error", "actions": ("cursor_look", "ruffle")},
+        "pet": {"priority": 35, "emotion": "pet", "actions": ("preen",)},
+        "ambient": {"priority": 10, "emotion": "idle", "actions": ("look",)},
+    }
+
+    def __init__(self) -> None:
+        self.queue: list[dict[str, Any]] = []
+        self.seen: dict[str, float] = {}
+
+    def emit(self, event: str, text: str = "", unique_key: str = "") -> bool:
+        blueprint = self.BLUEPRINTS.get(event, self.BLUEPRINTS["ambient"])
+        now = time.time()
+        key = unique_key or f"{event}:{text}"
+        if key in self.seen and now - self.seen[key] < 5:
+            return False
+        self.seen[key] = now
+        self.seen = {item: stamp for item, stamp in self.seen.items() if now - stamp < 3600}
+        self.queue.append({"event": event, "text": text, "priority": blueprint["priority"], "emotion": blueprint["emotion"], "actions": list(blueprint["actions"]), "created": now})
+        self.queue.sort(key=lambda item: (-int(item["priority"]), float(item["created"])))
+        return True
+
+    def next_scene(self) -> dict[str, Any] | None:
+        return self.queue.pop(0) if self.queue else None
+
+
+class AdventureSessionStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.data = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("active", False)
+                data.setdefault("events", [])
+                data.setdefault("sessions", [])
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {"active": False, "started_at": "", "events": [], "sessions": []}
+
+    def save(self) -> None:
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def start(self, scene: str = "") -> bool:
+        if self.data.get("active"):
+            return False
+        self.data.update({"active": True, "started_at": datetime.now().isoformat(timespec="seconds"), "events": []})
+        self.log("场景", scene or "冒险模式已开启")
+        return True
+
+    def log(self, category: str, text: str) -> None:
+        if not text.strip():
+            return
+        self.data.setdefault("events", []).append({"at": datetime.now().isoformat(timespec="seconds"), "category": category, "text": text.strip()})
+        self.data["events"] = self.data["events"][-120:]
+        self.save()
+
+    def stop(self) -> dict[str, Any] | None:
+        if not self.data.get("active"):
+            return None
+        summary = {"started_at": self.data.get("started_at", ""), "ended_at": datetime.now().isoformat(timespec="seconds"), "events": list(self.data.get("events", []))}
+        self.data.setdefault("sessions", []).append(summary)
+        self.data["sessions"] = self.data["sessions"][-30:]
+        self.data.update({"active": False, "started_at": "", "events": []})
+        self.save()
+        return summary
+
+
+class DropBagStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.items = data if isinstance(data, list) else []
+        except (OSError, json.JSONDecodeError):
+            self.items = []
+
+    def save(self) -> None:
+        self.path.write_text(json.dumps(self.items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def add_file(self, path: Path) -> dict[str, str]:
+        resolved = path.resolve()
+        if not resolved.exists():
+            raise ValueError("文件已经不存在")
+        item = {"id": datetime.now().strftime("%Y%m%d%H%M%S%f"), "kind": "file", "name": resolved.name, "content": str(resolved), "at": datetime.now().isoformat(timespec="seconds"), "status": "待处理"}
+        self.items.append(item)
+        self.items = self.items[-60:]
+        self.save()
+        return item
+
+    def add_text(self, text: str) -> dict[str, str]:
+        text = text.strip()
+        if not text:
+            raise ValueError("剪贴板里没有可投递的文字")
+        item = {"id": datetime.now().strftime("%Y%m%d%H%M%S%f"), "kind": "text", "name": text[:24] + ("…" if len(text) > 24 else ""), "content": text, "at": datetime.now().isoformat(timespec="seconds"), "status": "待处理"}
+        self.items.append(item)
+        self.items = self.items[-60:]
+        self.save()
+        return item
+
+    def mark(self, index: int, status: str) -> None:
+        self.items[index]["status"] = status
+        self.save()
+
+
+def build_adventure_timeline(archive_data: dict[str, Any], memory_data: dict[str, Any], session_data: dict[str, Any]) -> list[dict[str, str]]:
+    timeline: list[dict[str, str]] = []
+    stamp = str(archive_data.get("updated_at", ""))
+    if archive_data.get("current_scene"):
+        timeline.append({"at": stamp, "category": "当前场景", "text": str(archive_data["current_scene"])})
+    for event in archive_data.get("recent_events", []):
+        if isinstance(event, dict):
+            timeline.append({"at": str(event.get("at", stamp)), "category": str(event.get("category", "冒险")), "text": str(event.get("text", ""))})
+    for event in memory_data.get("journal", []):
+        if isinstance(event, dict):
+            timeline.append({"at": str(event.get("time", "")), "category": str(event.get("category", "漆黑日记")), "text": str(event.get("text", ""))})
+    for session in session_data.get("sessions", []):
+        if isinstance(session, dict):
+            for event in session.get("events", []):
+                if isinstance(event, dict):
+                    timeline.append({"at": str(event.get("at", "")), "category": str(event.get("category", "跑团")), "text": str(event.get("text", ""))})
+    for event in session_data.get("events", []):
+        if isinstance(event, dict):
+            timeline.append({"at": str(event.get("at", "")), "category": str(event.get("category", "跑团")), "text": str(event.get("text", ""))})
+    return sorted(timeline, key=lambda item: item.get("at", ""), reverse=True)
+
+
 CHINESE_NUMBERS = {
     "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
     "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
@@ -749,6 +1017,7 @@ def explain_openai_http_error(status: int, error_data: Any) -> tuple[str, str]:
 def ask_openai(
     question: str, history: list[dict[str, str]] | None = None,
     usage_store: APIUsageStore | None = None,
+    memory_context: str = "", archive_context: str = "",
 ) -> str:
     api_key = get_openai_api_key()
     model = os.getenv("QIHEI_OPENAI_MODEL", "gpt-5.4-mini")
@@ -768,9 +1037,15 @@ def ask_openai(
     conversation = "\n".join(
         f"{turn.get('role', 'user')}: {turn.get('content', '')}" for turn in (history or [])[-6:]
     )
+    context_sections = [PERSONA, "以下是当前战役档案：\n" + (archive_context or STORY_SUMMARY)]
+    if memory_context.strip():
+        context_sections.append(
+            "以下是用户可查看和删除的本地长期记忆。只在确实相关时自然使用，不要逐条复述：\n"
+            + memory_context.strip()
+        )
     payload = {
         "model": model,
-        "instructions": PERSONA + "\n以下是当前战役档案：\n" + STORY_SUMMARY,
+        "instructions": "\n\n".join(context_sections),
         "input": (conversation + "\nuser: " + question).strip(),
         "max_output_tokens": 500,
     }
@@ -850,7 +1125,11 @@ def roll_dice(expression: str) -> dict[str, Any]:
         comment = "我建议把这次结果归档为敌方情报。"
     else:
         comment = "结果普通，但活下来通常靠的就是普通。"
-    return {"expression": expression.strip().lower(), "rolls": rolls, "modifier": modifier, "total": total, "comment": comment}
+    return {
+        "expression": expression.strip().lower(), "rolls": rolls,
+        "count": count, "sides": sides, "natural": natural,
+        "modifier": modifier, "total": total, "comment": comment,
+    }
 
 
 class MemoStore:
