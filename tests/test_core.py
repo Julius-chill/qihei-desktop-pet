@@ -351,6 +351,30 @@ class AnimationDirectionTests(unittest.TestCase):
         self.assertFalse(QiheiPet.should_mirror_for_flight("realistic", 100, 500))
         self.assertTrue(QiheiPet.should_mirror_for_flight("realistic", 500, 100))
 
+    def test_edge_peek_uses_flight_instead_of_teleporting(self):
+        pet = QiheiPet.__new__(QiheiPet)
+        pet.flight = None
+        pet.action = None
+        pet.sleeping = False
+        pet.perched_window = 123
+        pet.root = MagicMock()
+        pet.root.winfo_x.return_value = 480
+        pet.root.winfo_y.return_value = 620
+        pet.virtual_screen_bounds = MagicMock(return_value=(0, 0, 1920, 1080))
+        pet.orient_toward = MagicMock()
+        pet.director = MagicMock()
+
+        with patch("pet.random.choice", return_value="left"), \
+             patch("pet.random.randint", return_value=300), \
+             patch("pet.time.perf_counter", return_value=42.0):
+            pet.peek_from_edge()
+
+        self.assertEqual(pet.flight["sx"], 480)
+        self.assertEqual(pet.flight["tx"], -56)
+        self.assertEqual(pet.flight["ty"], 300)
+        self.assertGreater(pet.flight["duration"], 1.0)
+        pet.root.geometry.assert_not_called()
+
     def test_grounded_bird_action_sheets_have_six_transparent_cells(self):
         for style in ("pixel", "realistic"):
             for action in ("look", "peck", "preen", "stretch"):

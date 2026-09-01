@@ -809,10 +809,23 @@ class QiheiPet:
         left, top, right, bottom = self.virtual_screen_bounds()
         side = random.choice(("left", "right"))
         y = random.randint(top + 80, max(top + 80, bottom - PET_SIZE - 90))
-        x = left - PET_SIZE // 2 if side == "left" else right - PET_SIZE // 2
+        tx = left - PET_SIZE // 2 if side == "left" else right - PET_SIZE // 2
+        sx, sy = self.root.winfo_x(), self.root.winfo_y()
         self.perched_window = None
-        self.move_pet(x, y)
         self.orient_toward(left + 200 if side == "left" else right - 200)
+        # Edge-peeking used to move the transparent top-level window directly
+        # to the screen boundary. When the idle-context timer selected it, the
+        # bird appeared to teleport. Treat it as a real flight so every change
+        # of location remains visible and uses the normal take-off/landing
+        # transition.
+        distance = math.hypot(tx - sx, y - sy)
+        self.flight = {
+            "start": time.perf_counter(),
+            "duration": min(3.2, max(1.5, distance / 430)),
+            "sx": sx, "sy": sy, "tx": tx, "ty": y,
+            "arc": min(90, max(34, round(distance * 0.13))),
+            "reward": False, "perch_hwnd": None,
+        }
         self.director.emit("ambient", "边界清晰。外面没有另一个桌面，暂时。", "edge-peek")
 
     def orient_toward(self, screen_x: float) -> None:
@@ -2962,7 +2975,7 @@ class QiheiPet:
     def drag(self, event: tk.Event) -> None:
         if self.drag_origin:
             self.dragged = True
-            self.root.geometry(f"+{event.x_root - self.drag_origin[0]}+{event.y_root - self.drag_origin[1]}")
+            self.move_pet(event.x_root - self.drag_origin[0], event.y_root - self.drag_origin[1])
 
     def end_drag(self, _event: tk.Event) -> None:
         if not self.drag_origin:
