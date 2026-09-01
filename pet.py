@@ -514,6 +514,8 @@ class QiheiPet:
             x = self.flight["sx"] + (self.flight["tx"] - self.flight["sx"]) * smooth
             y = (self.flight["sy"] + (self.flight["ty"] - self.flight["sy"]) * smooth
                  - math.sin(math.pi * progress) * self.flight["arc"])
+            _left, screen_top, _right, _bottom = self.virtual_screen_bounds()
+            y = max(screen_top, y)
             self.move_pet(x, y)
             if progress >= 1:
                 landing_perch = int(self.flight.get("perch_hwnd", 0) or 0)
@@ -533,7 +535,7 @@ class QiheiPet:
                     if unlock:
                         self.say(unlock, 5200)
                 self.flight = None
-                if landing_perch and self.window_rect(landing_perch):
+                if landing_perch and self.suitable_perch_window(landing_perch):
                     self.perched_window = landing_perch
                 self.emotion.trigger("flight")
                 self.save_state()
@@ -739,6 +741,14 @@ class QiheiPet:
         buffer = ctypes.create_unicode_buffer(128)
         return buffer.value if ctypes.windll.user32.GetClassNameW(hwnd, buffer, len(buffer)) else ""
 
+    def suitable_perch_window(self, hwnd: int) -> bool:
+        """Exclude the desktop and taskbars from automatic window perching."""
+        if not self.window_rect(hwnd):
+            return False
+        return self.window_class(hwnd) not in {
+            "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+        }
+
     def virtual_screen_bounds(self) -> tuple[int, int, int, int]:
         if sys.platform.startswith("win"):
             left = int(ctypes.windll.user32.GetSystemMetrics(76))
@@ -750,7 +760,21 @@ class QiheiPet:
         return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
     def move_pet(self, x: float, y: float) -> None:
-        self.root.geometry(f"{round(x):+d}{round(y):+d}")
+        target_x, target_y = round(x), round(y)
+        if sys.platform.startswith("win"):
+            # Tk interprets a negative geometry coordinate as an offset from
+            # the right/bottom edge. A hop from y=0 to y=-1 therefore used to
+            # jump to the taskbar for one frame. SetWindowPos uses true virtual
+            # desktop coordinates, including negative-monitor positions.
+            hwnd = int(self.root.winfo_id())
+            top_level = int(ctypes.windll.user32.GetAncestor(hwnd, 2) or hwnd)
+            flags = 0x0001 | 0x0004 | 0x0010  # NOSIZE | NOZORDER | NOACTIVATE
+            if ctypes.windll.user32.SetWindowPos(
+                top_level, 0, target_x, target_y, 0, 0, flags,
+            ):
+                return
+            target_x, target_y = max(0, target_x), max(0, target_y)
+        self.root.geometry(f"+{target_x}+{target_y}")
 
     def remember_foreground_window(self) -> None:
         if not sys.platform.startswith("win"):
@@ -760,7 +784,7 @@ class QiheiPet:
             return
         process_id = ctypes.c_ulong()
         ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
-        if process_id.value != os.getpid() and self.window_rect(hwnd):
+        if process_id.value != os.getpid() and self.suitable_perch_window(hwnd):
             self.last_external_window = hwnd
             window_class = self.window_class(hwnd)
             if window_class and window_class != self.last_window_title:
@@ -773,7 +797,7 @@ class QiheiPet:
     def perch_on_foreground_window(self) -> None:
         self.remember_foreground_window()
         hwnd = getattr(self, "last_external_window", None)
-        rect = self.window_rect(hwnd or 0)
+        rect = self.window_rect(hwnd or 0) if self.suitable_perch_window(hwnd or 0) else None
         if not rect:
             self.say("没找到适合停驻的窗口。先点一下目标窗口，再叫我。", 5200)
             return
@@ -784,7 +808,7 @@ class QiheiPet:
         self.say("落点确认。放心，我离关闭按钮很远。", 4300)
 
     def update_perched_position(self) -> None:
-        rect = self.window_rect(self.perched_window or 0)
+        rect = self.window_rect(self.perched_window or 0) if self.suitable_perch_window(self.perched_window or 0) else None
         if not rect:
             self.perched_window = None
             return
@@ -798,7 +822,7 @@ class QiheiPet:
     def stroll_on_titlebar(self) -> None:
         if not self.perched_window:
             self.perch_on_foreground_window()
-        if not self.perched_window or not self.window_rect(self.perched_window):
+        if not self.perched_window or not self.suitable_perch_window(self.perched_window):
             return
         self.start_hop(evade=False)
         self.director.emit("ambient", "巡查窗沿。别担心，我不会踩你的关闭按钮。", "titlebar-stroll")
@@ -868,6 +892,8 @@ class QiheiPet:
         smooth = progress * progress * (3 - 2 * progress)
         x = float(self.action["sx"]) + (float(self.action["tx"]) - float(self.action["sx"])) * smooth
         y = float(self.action["sy"]) - math.sin(math.pi * progress) * 11
+        _left, screen_top, _right, _bottom = self.virtual_screen_bounds()
+        y = max(screen_top, y)
         self.move_pet(x, y)
 
     def finish_ground_action(self) -> None:
@@ -877,7 +903,10 @@ class QiheiPet:
         if name == "hop":
             self.move_pet(float(self.action["tx"]), float(self.action["ty"]))
             if self.perched_window:
-                rect = self.window_rect(self.perched_window)
+                rect = (
+                    self.window_rect(self.perched_window)
+                    if self.suitable_perch_window(self.perched_window) else None
+                )
                 if rect:
                     left, _top, right, _bottom = rect
                     center = float(self.action["tx"]) + PET_SIZE // 2
@@ -909,7 +938,10 @@ class QiheiPet:
             ty = min(max(min_y, self.root.winfo_pointery() - PET_SIZE - 25), max_y)
             perch_hwnd = None
         else:
-            perch_rect = self.window_rect(self.last_external_window or 0)
+            perch_rect = (
+                self.window_rect(self.last_external_window or 0)
+                if self.suitable_perch_window(self.last_external_window or 0) else None
+            )
             if perch_rect and random.random() < 0.38:
                 left, top, right, _bottom = perch_rect
                 self.perch_offset = random.uniform(0.28, 0.74)

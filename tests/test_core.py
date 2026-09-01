@@ -375,6 +375,37 @@ class AnimationDirectionTests(unittest.TestCase):
         self.assertGreater(pet.flight["duration"], 1.0)
         pet.root.geometry.assert_not_called()
 
+    def test_windows_motion_uses_absolute_virtual_desktop_coordinates(self):
+        pet = QiheiPet.__new__(QiheiPet)
+        pet.root = MagicMock()
+        pet.root.winfo_id.return_value = 77
+        with patch("pet.sys.platform", "win32"), patch("pet.ctypes.windll.user32") as user32:
+            user32.GetAncestor.return_value = 88
+            user32.SetWindowPos.return_value = 1
+            pet.move_pet(-12, -3)
+        user32.SetWindowPos.assert_called_once_with(88, 0, -12, -3, 0, 0, 0x15)
+        pet.root.geometry.assert_not_called()
+
+    def test_desktop_and_taskbar_are_not_perch_targets(self):
+        pet = QiheiPet.__new__(QiheiPet)
+        pet.window_rect = MagicMock(return_value=(0, 0, 1920, 1080))
+        pet.window_class = MagicMock(return_value="Shell_TrayWnd")
+        self.assertFalse(pet.suitable_perch_window(101))
+        pet.window_class.return_value = "Chrome_WidgetWin_1"
+        self.assertTrue(pet.suitable_perch_window(102))
+
+    def test_hop_at_top_edge_never_crosses_into_negative_y(self):
+        pet = QiheiPet.__new__(QiheiPet)
+        pet.action = {
+            "name": "hop", "started": 10.0, "until": 11.0,
+            "sx": 100, "sy": 0, "tx": 140, "ty": 0,
+        }
+        pet.virtual_screen_bounds = MagicMock(return_value=(0, 0, 1920, 1080))
+        pet.move_pet = MagicMock()
+        pet.update_ground_action(10.5)
+        _x, y = pet.move_pet.call_args.args
+        self.assertEqual(y, 0)
+
     def test_grounded_bird_action_sheets_have_six_transparent_cells(self):
         for style in ("pixel", "realistic"):
             for action in ("look", "peck", "preen", "stretch"):
